@@ -118,7 +118,7 @@ fn token_from_row(r: &Row<'_>) -> rusqlite::Result<Token> {
     })
 }
 
-const TOKEN_SELECT: &str = "SELECT t.token_id, a.name, p.slug, t.label, t.project_globs,
+const TOKEN_SELECT: &str = "SELECT t.token_id, a.address, NULL, t.label, t.project_globs,
        t.created_at, t.expires_at, t.revoked_at, t.last_used_at
      FROM tokens t JOIN agents a ON a.agent_id = t.agent_id
      LEFT JOIN projects p ON p.project_id = a.project_id";

@@ -5,7 +5,8 @@ use std::fmt::Write;
 use serde::Serialize;
 use wyres_core::{
     ActivityFeed, Agent, AuditEntry, Event, HeartbeatReport, Hold, HoldConflict, HoldReport, Inbox,
-    LeaseOutcome, Message, NodeInfo, Project, Request, Resource, Thread, ThreadSummary, Token,
+    LeaseOutcome, Message, NodeInfo, Peer, Project, Request, Resource, Thread, ThreadSummary,
+    Token,
 };
 
 #[derive(Debug, Serialize)]
@@ -201,11 +202,19 @@ pub fn conflicts(cs: &[HoldConflict]) -> String {
 }
 
 pub fn hold_report(r: &HoldReport) -> String {
-    if r.conflicts.is_empty() {
+    let mut out = if r.conflicts.is_empty() {
         holds(&r.granted)
     } else {
         format!("nothing acquired\n{}", conflicts(&r.conflicts))
+    };
+    for w in &r.warnings {
+        let _ = writeln!(
+            out,
+            "warning: {} overlaps {} held on another node by {} (holds are node-local; coordinate)",
+            w.path, w.held.pattern, w.held.agent
+        );
     }
+    out
 }
 
 pub fn heartbeat(h: &HeartbeatReport) -> String {
@@ -421,4 +430,40 @@ pub fn audit(es: &[AuditEntry]) -> String {
             )
         })
         .collect()
+}
+
+pub fn peers(ps: &[Peer]) -> String {
+    if ps.is_empty() {
+        return "not paired with any node".to_string();
+    }
+    ps.iter()
+        .map(|p| {
+            let perms: Vec<&str> = p.perms.iter().map(|x| x.as_str()).collect();
+            format!(
+                "{:<6} {:<16} {}  key {}  perms [{}]  last sync {}{}\n",
+                p.role,
+                p.display_name,
+                p.url.as_deref().unwrap_or("-"),
+                p.fingerprint,
+                perms.join(", "),
+                p.last_sync_at.as_deref().unwrap_or("never"),
+                if p.revoked_at.is_some() {
+                    "  (revoked)"
+                } else {
+                    ""
+                }
+            )
+        })
+        .collect()
+}
+
+pub fn sync_report(r: &crate::fed::SyncReport) -> String {
+    let mut out = format!(
+        "synced with {}: pushed {} ({} already there), pulled {} (applied {}, {} duplicate)",
+        r.hub, r.pushed, r.push_duplicates, r.pulled, r.applied, r.pull_duplicates
+    );
+    for x in r.push_rejected.iter().chain(&r.pull_rejected) {
+        let _ = write!(out, "\nrejected {}: {}", x.event_id, x.reason);
+    }
+    out
 }

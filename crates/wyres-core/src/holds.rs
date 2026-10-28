@@ -49,6 +49,9 @@ pub struct HoldReport {
     /// Holds now owned by the caller (empty if any conflict was found).
     pub granted: Vec<Hold>,
     pub conflicts: Vec<HoldConflict>,
+    /// Overlapping holds on other nodes in a project with the same name. Holds are node-local,
+    /// so these never block; they flag a likely cross-machine clash.
+    pub warnings: Vec<HoldConflict>,
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -112,7 +115,7 @@ pub struct HoldFilter {
 }
 
 const HOLD_SELECT: &str =
-    "SELECT h.hold_id, p.slug, a.name, ap.slug, h.pattern, h.exclusive, h.reason,
+    "SELECT h.hold_id, p.slug, a.address, NULL, h.pattern, h.exclusive, h.reason,
        h.ttl_seconds, h.created_at, h.expires_at
      FROM holds h
      JOIN projects p ON p.project_id = h.project_id
@@ -287,6 +290,33 @@ fn conflicts_for(
     Ok(conflicts)
 }
 
+/// Live holds on other nodes, in a project with the same slug, overlapping `patterns`.
+fn remote_clashes(
+    tx: &Tx<'_>,
+    project: &Project,
+    patterns: &[(String, String)],
+) -> Result<Vec<HoldConflict>> {
+    let mut stmt = tx.prepare(&format!(
+        "{HOLD_SELECT} WHERE h.released_at IS NULL AND h.expires_at > ?1 AND h.node_id != ?2
+           AND p.slug = ?3 ORDER BY h.created_at"
+    ))?;
+    let theirs = stmt
+        .query_map(params![tx.now, tx.node_id, project.slug], hold_from_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut out = Vec::new();
+    for (requested, pattern) in patterns {
+        for held in &theirs {
+            if patterns_overlap(pattern, &held.pattern) {
+                out.push(HoldConflict {
+                    path: requested.clone(),
+                    held: held.clone(),
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
 pub(crate) fn sweep_tx(tx: &Tx<'_>) -> Result<SweepReport> {
     let mut stmt = tx.prepare(
         "SELECT hold_id, pattern, agent_id FROM holds
@@ -417,11 +447,13 @@ impl Store {
             }
             let conflicts =
                 conflicts_for(tx, &project.project_id, &me.id, &patterns, input.exclusive)?;
+            let warnings = remote_clashes(tx, &project, &patterns)?;
             if !conflicts.is_empty() {
                 touch(tx, &me.id)?;
                 return Ok(HoldReport {
                     granted: Vec::new(),
                     conflicts,
+                    warnings,
                 });
             }
             let mut granted_ids = Vec::new();
@@ -437,6 +469,7 @@ impl Store {
                     .ok();
                 let expires_at = tx.now + ttl * 1000;
                 let payload = json!({
+                    "agent_id": me.id,
                     "project_id": project.project_id,
                     "pattern": pattern,
                     "exclusive": input.exclusive,
@@ -487,6 +520,7 @@ impl Store {
             Ok(HoldReport {
                 granted: holds_by_id(tx, &granted_ids)?,
                 conflicts: Vec::new(),
+                warnings,
             })
         })
     }

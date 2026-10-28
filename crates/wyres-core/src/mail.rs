@@ -176,7 +176,7 @@ fn check_text(subject: &str, body: &str) -> Result<()> {
 pub(crate) fn load_message(conn: &Connection, message_id: &str) -> Result<Message> {
     let row = conn
         .query_row(
-            "SELECT m.message_id, m.thread_id, m.reply_to, a.name, p.slug, m.subject, m.body,
+            "SELECT m.message_id, m.thread_id, m.reply_to, a.address, NULL, m.subject, m.body,
                     m.importance, m.ack_required, m.created_at,
                     (SELECT request_id FROM requests r WHERE r.message_id = m.message_id)
              FROM messages m
@@ -208,7 +208,7 @@ pub(crate) fn load_message(conn: &Connection, message_id: &str) -> Result<Messag
         .ok_or_else(|| Error::NotFound(format!("unknown message {message_id:?}")))?;
     let mut msg = row;
     let mut stmt = conn.prepare(
-        "SELECT d.role, a.name, p.slug FROM deliveries d
+        "SELECT d.role, a.address, NULL FROM deliveries d
          JOIN agents a ON a.agent_id = d.agent_id
          LEFT JOIN projects p ON p.project_id = a.project_id
          WHERE d.message_id = ?1 ORDER BY d.rowid",
@@ -236,7 +236,7 @@ pub(crate) fn load_message(conn: &Connection, message_id: &str) -> Result<Messag
 fn resolve_all(tx: &Tx<'_>, names: &[String]) -> Result<Vec<AgentRef>> {
     names
         .iter()
-        .map(|n| resolve_agent(tx, tx.node_id, n))
+        .map(|n| crate::identity::resolve_any(tx, tx.node_id, n))
         .collect()
 }
 
@@ -301,6 +301,26 @@ pub(crate) fn send_tx(tx: &Tx<'_>, input: &SendMessage) -> Result<Message> {
             .collect()
     };
 
+    // Recipients on other nodes travel through the hub; requests stay node-local.
+    let mut foreign_nodes: Vec<String> = recipients
+        .iter()
+        .map(|(a, _)| a.node_id.clone())
+        .filter(|n| n != tx.node_id)
+        .collect();
+    foreign_nodes.sort();
+    foreign_nodes.dedup();
+    if !foreign_nodes.is_empty() {
+        if input.request.is_some() {
+            return Err(Error::Invalid(
+                "requests are node-local: open them only with agents on this node".into(),
+            ));
+        }
+        for node in &foreign_nodes {
+            crate::federation::allowed_towards(tx, node, crate::federation::Perm::SendMail)?;
+        }
+    }
+    let mut recipient_nodes = vec![tx.node_id.to_string()];
+    recipient_nodes.extend(foreign_nodes);
     let request_id = input.request.as_ref().map(|_| new_id());
     let event_id = tx.emit(
         &sender.address,
@@ -317,6 +337,12 @@ pub(crate) fn send_tx(tx: &Tx<'_>, input: &SendMessage) -> Result<Message> {
             "importance": input.importance.as_str(),
             "ack_required": input.ack_required,
             "request_id": request_id,
+            "sender_id": sender.id,
+            "recipients": recipients
+                .iter()
+                .map(|(a, role)| json!({ "agent_id": a.id, "node_id": a.node_id, "role": role }))
+                .collect::<Vec<_>>(),
+            "recipient_nodes": recipient_nodes,
         }),
     )?;
     tx.execute(
@@ -340,7 +366,7 @@ pub(crate) fn send_tx(tx: &Tx<'_>, input: &SendMessage) -> Result<Message> {
     for (agent, role) in &recipients {
         tx.execute(
             "INSERT INTO deliveries (message_id, agent_id, node_id, role) VALUES (?1, ?2, ?3, ?4)",
-            params![message_id, agent.id, tx.node_id, role],
+            params![message_id, agent.id, agent.node_id, role],
         )?;
     }
     if let (Some(req), Some(request_id)) = (&input.request, &request_id) {
@@ -504,7 +530,16 @@ impl Store {
                     continue;
                 }
                 let kind = if mark_ack { "delivery.acked" } else { "delivery.read" };
-                tx.emit(&me.address, kind, json!({ "message_id": id, "agent_id": me.id }))?;
+                let message_node: String = tx.query_row(
+                    "SELECT node_id FROM messages WHERE message_id = ?1",
+                    [id],
+                    |r| r.get(0),
+                )?;
+                tx.emit(
+                    &me.address,
+                    kind,
+                    json!({ "message_id": id, "agent_id": me.id, "message_node": message_node }),
+                )?;
                 tx.execute(
                     "UPDATE deliveries SET
                        read_at = coalesce(read_at, ?3),
@@ -600,14 +635,14 @@ impl Store {
 
 fn thread_participants(conn: &Connection, thread_id: &str) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(
-        "SELECT DISTINCT a.name, p.slug FROM agents a
+        "SELECT DISTINCT a.address, NULL FROM agents a
          LEFT JOIN projects p ON p.project_id = a.project_id
          WHERE a.agent_id IN (
            SELECT sender_id FROM messages WHERE thread_id = ?1
            UNION
            SELECT d.agent_id FROM deliveries d JOIN messages m ON m.message_id = d.message_id
             WHERE m.thread_id = ?1)
-         ORDER BY a.name, p.slug",
+         ORDER BY a.address",
     )?;
     let rows = stmt.query_map([thread_id], |r| {
         Ok(address(

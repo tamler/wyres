@@ -113,7 +113,7 @@ pub struct RequestFilter {
     pub limit: u32,
 }
 
-const REQUEST_SELECT: &str = "SELECT r.request_id, r.title, r.status, o.name, op.slug, c.name, cp.slug,
+const REQUEST_SELECT: &str = "SELECT r.request_id, r.title, r.status, o.address, NULL, c.address, NULL,
        r.thread_id, r.message_id, r.due_at, r.note, r.created_at, r.updated_at, r.claimed_at, r.closed_at
      FROM requests r
      JOIN agents c ON c.agent_id = r.created_by

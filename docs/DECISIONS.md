@@ -5,7 +5,7 @@ Locked defaults for v1 (2026-10-28). See [SPEC.md](SPEC.md) for the full researc
 | Decision | Choice | Notes |
 |---|---|---|
 | License | **Apache-2.0** | Patent grant; company-friendly; matches `rmcp` / A2A / Herdr. |
-| Agent names | **Unique per project** | Addressed as `name@project` (an agent registered without a project is just `name`). A bare `name` resolves when exactly one agent on the node has it; otherwise it is rejected as ambiguous and callers must use `name@project`. Federation later uses `agent@project@node`. |
+| Agent names | **Unique per project** | Addressed as `name@project` (an agent registered without a project is just `name`). A bare `name` resolves when exactly one agent on the node has it; otherwise it is rejected as ambiguous and callers must use `name@project`. Across nodes (M5): `name@project@node`, or `name@@node` for agents without a project. |
 | Database location | **`~/.wyres`** (override with `$WYRES_HOME`) | One local node database; not per-repo. |
 | Beads | **Deferred** | Keep requests inside Wyres for now; revisit linkage later. |
 | Stack | **Rust + official `rmcp` + SQLite** | Single static binary; hooks stay tiny shell scripts. |
@@ -41,3 +41,12 @@ Design calls not covered by SPEC, recorded as they were made.
 | D17 | M4 | **`resource_reap` is refused for every remote caller**, regardless of token scope. |
 | D18 | M4 | **Audit log is separate from the event log**: node-local security records (not synced), arguments redacted (bodies and notes replaced by their size). Denied and unauthenticated requests are logged too. |
 | D19 | M4 | **No built-in TLS.** Remote access goes through a tunnel or reverse proxy that terminates TLS; `--allowed-host` names tunnel hostnames for DNS-rebinding protection. |
+| D20 | M5 | **Ed25519 node keys; every event signed by its origin.** Older databases get a key on upgrade and their events are signed then. Hubs pin a spoke's key at pairing; spokes trust the hub's node directory (hub-and-spoke trust). |
+| D21 | M5 | **Agent addresses are stored** (`agents.address`) so foreign agents read as `name@project@node` everywhere (from/to, owners, leases) and replies route unambiguously. Acting identities must be local; recipients and filters may be remote. |
+| D22 | M5 | **Routing classes**: directory events to every peer; mail only to recipient nodes (local-only mail never leaves its node); receipts to the message's node; activity to `read_feed` peers plus the owner of a borrowed resource; tokens, audit and pairing records never. |
+| D23 | M5 | **Hub enforces permissions on push** (a spoke may only push its own events; `send_mail` for cross-node mail; `borrow_resource` for borrowing other nodes' resources). Rejected events are reported and skipped so the spoke's cursor still advances. |
+| D24 | M5 | **Requests are node-local.** Opening a request with a recipient on another node is refused; plain mail works. |
+| D25 | M5 | **Remote resources**: reachability is a TCP connect from this machine to the endpoint; foreign leases count until their TTL even if the borrower goes offline; stop/reap only on the owning node; a lapsed remote resource can only be adopted on its node. |
+| D26 | M5 | **Cross-node hold clashes are warnings**, matched by project slug (repository name) since paths differ between machines. |
+| D27 | M5 | **Node names must be unique** in a federation and set before pairing (`wyres node name`); the default `local` cannot pair. |
+| D28 | M5 | **Hub reads relayed mail bodies** (self-hosted hub; end-to-end encryption deferred). Node-to-node requests are signed and time-bounded (±5 min); replays are harmless because push is idempotent and pull is read-only. |

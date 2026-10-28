@@ -24,6 +24,8 @@ pub struct HttpOptions {
     pub allow_remote_bind: bool,
     /// Extra `Host` header values to accept (tunnel hostnames). Only with `auth`.
     pub allowed_hosts: Vec<String>,
+    /// Serve the federation hub endpoints (`/fed/*`), authenticated by node signatures.
+    pub federation: bool,
 }
 
 /// Resolve a bind address and refuse anything that is not loopback.
@@ -116,6 +118,11 @@ pub fn http_router(store: Store, ct: CancellationToken, opts: &HttpOptions) -> a
             store.clone(),
             crate::remote::require_token,
         ))
+    } else {
+        protected
+    };
+    let protected = if opts.federation {
+        protected.merge(crate::fed::router(store.clone()))
     } else {
         protected
     };

@@ -1,50 +1,51 @@
-# AGENTS.md — build brief (Milestone 4: authenticated remote peer)
+# AGENTS.md — build brief (Milestone 5: federation, v2)
 
 **Read this before writing code.** Product vision lives in [docs/SPEC.md](docs/SPEC.md); locked defaults and milestone decisions in [docs/DECISIONS.md](docs/DECISIONS.md). This file is the scope for the current coding milestone.
 
 ## Status
 
-Milestone 4: **complete** (definition of done met). Earlier: M1 local core (tamler/wyres#1), M2 mail checking + activity feed (tamler/wyres#2), M3 resource registry (tamler/wyres#3). Keep the [README.md](README.md) status current in every PR.
+Milestone 5: **complete** (definition of done met). Earlier: M1 local core (tamler/wyres#1), M2 mail checking + activity feed (tamler/wyres#2), M3 resource registry (tamler/wyres#3), M4 authenticated remote peer (tamler/wyres#4). Keep the [README.md](README.md) status current in every PR.
 
 ## Clean-room rules (mandatory)
 
-- Implement from **this repository's docs** only.
+- Implement from **this repository's docs** only. Federation prior art in SPEC (Matrix, ActivityPub, NATS leaf nodes, Tailscale) is for ideas only.
 - **Do not** copy code, schemas, SQL, phrasing, or distinctive APIs from `mcp_agent_mail*`, forks, or any project with a non-permissive license rider.
-- Public docs for MCP, `rmcp`, axum, Tailscale, Cloudflare and OpenSSH are fine.
 
 ## Locked defaults
 
-Apache-2.0; agent names unique per project; DB at `~/.wyres`; Rust + `rmcp` + SQLite; hooks-first; free and open source always; MSRV 1.88. **Never bind beyond loopback without auth. Never reap remotely.**
+Apache-2.0; agent names unique per project; `node_id` + append-only event log; owning node is law; never CRDT-merge ownership; free and open source always (self-hostable hub, no paid relay); never bind beyond loopback without auth; **never remote reap**; MSRV 1.88.
 
-## Milestone 4 — in scope
+## Milestone 5 — in scope
 
-Grok Bot (and any remote agent) as a first-class peer over authenticated streamable HTTP MCP.
+1. **Per-node authority + keys** — Ed25519 key per node (created on first boot; older databases get one and their events signed on upgrade); every event signed; foreign events verified, projected, never allowed to rewrite local ownership.
+2. **Addressing** — `name@project@node` (and `name@@node`); local addresses unchanged; agents act only on their own node.
+3. **Pairing** — `wyres node name`, `wyres pair invite|join|revoke`, `wyres peers`; single-use invites carrying the hub's key; unique node names.
+4. **Sync** — hub-and-spoke: `wyres serve --federation` (hub), `wyres sync [--watch]` (spokes dial out); push own events, pull a filtered stream with cursors; idempotent; signed node requests.
+5. **Scoped permissions** — `read_feed`, `send_mail`, `borrow_resource`, enforced by the hub on push and by nodes before sending; no remote reap permission exists.
+6. **Cross-node mail** (routed only to recipient nodes) and a **merged activity feed** (node-prefixed).
+7. **Remote resources** — visible with owning node and reachability; borrowable only when reachable and permitted; lease reported to the owner; stop/reap only on the owning node.
+8. **Path clashes** — overlapping holds on another node in a same-named project come back as warnings, never locks.
+9. **Tests** — multiple nodes on one machine over real HTTP.
+10. **Docs** — [docs/FEDERATION.md](docs/FEDERATION.md).
 
-1. **Tokens** — `wyres token create --agent NAME [--project GLOB]… [--label] [--expires]`, `wyres token list`, `wyres token revoke ID`. A token acts as exactly one agent and only within its project globs; only a SHA-256 hash is stored and the secret is shown once.
-2. **Authenticated HTTP** — `wyres serve --auth`: `/mcp` and `GET /activity` require `Authorization: Bearer`; every request is verified (tunnels arrive from loopback). `--allowed-host` accepts tunnel hostnames.
-3. **Scoping** — per-tool rules: the acting agent must be the token's agent (filled in when omitted); project arguments must match the globs; threads only if the agent is a participant; feed/summary/resource_find are node-wide read-only awareness; `orphans_list` never scans processes remotely.
-4. **Never `remote_reap`** — `resource_reap` is refused for every token.
-5. **Audit log** — every remote request (allowed, failed or denied) with token, agent, operation, outcome, redacted arguments and remote address; `wyres audit`.
-6. **Binding** — a non-loopback bind needs both `--auth` and `--allow-remote-bind`; otherwise refused.
-7. **`GET /activity`** — `since`, `limit`, `kinds`; same JSON as `activity_feed`; no message bodies.
-8. **Docs** — [docs/REMOTE.md](docs/REMOTE.md): Tailscale Serve, Cloudflare Tunnel, `ssh -R`, `program=grok_bot` registration.
+### Definition of done (Milestone 5)
 
-### Definition of done (Milestone 4)
-
-- [x] `wyres token create|list|revoke`; hashed secrets; expiry; revocation effective on the next request
-- [x] `wyres serve --auth` with bearer verification on `/mcp` and `GET /activity`; `--allowed-host`
-- [x] Agent + project-glob scoping for every tool; `resource_reap` never allowed remotely
-- [x] Audit log of every remote call (redacted); `wyres audit`
-- [x] Non-loopback bind only with `--auth` and `--allow-remote-bind`
-- [x] Tests: 401s, scoping, denials, audit entries and redaction, GET /activity, revocation, expiry, CLI and bind rules
-- [x] docs/REMOTE.md (Tailscale Serve, Cloudflare Tunnel, ssh -R, grok_bot registration)
+- [x] Node keys, signed events, verification on ingest; owning node authoritative
+- [x] `agent@project@node` addressing; acting agents must be local
+- [x] `wyres pair invite|join|revoke`, `wyres peers`, `wyres node name|show`
+- [x] `wyres serve --federation` hub endpoints; `wyres sync [--watch]` push/pull with cursors
+- [x] Permissions `read_feed` / `send_mail` / `borrow_resource`; never remote reap
+- [x] Cross-node mail, replies, receipts; merged activity feed
+- [x] Remote resources visible; borrow only when reachable; reported to owner
+- [x] Cross-node hold clashes as warnings
+- [x] Multi-node integration tests on one machine (hub + 3 spokes), tampering, revocation, CLI
 - [x] CI green: test + clippy (`-D warnings`) + fmt + MSRV 1.88
 - [x] README status updated
 
-## Explicitly OUT of scope (later milestones)
+## Explicitly OUT of scope
 
-- Node pairing, per-node keys, event-log sync, cross-node mail (Milestone 5)
-- Built-in TLS termination (use a tunnel or a reverse proxy), OAuth
+- Mesh topology; multiple hubs per spoke; end-to-end encryption of mail bodies (future)
+- Cross-node requests and distributed path locks (by design)
 - Wake adapters, Herdr plugin, release builds (Milestone 6)
 
 ## Keep the README status current

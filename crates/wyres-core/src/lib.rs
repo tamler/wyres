@@ -6,7 +6,9 @@
 //! breaking migration.
 
 mod activity;
+pub mod crypto;
 mod error;
+mod federation;
 mod holds;
 mod identity;
 mod mail;
@@ -21,6 +23,10 @@ pub use activity::{
     RequestCounts, Since,
 };
 pub use error::{Error, ErrorBody, Result};
+pub use federation::{
+    reachable, IngestReport, Invite, NodeEntry, PairRequest, PairResponse, Peer, Perm,
+    PullResponse, PushRequest, Rejected, WireEvent,
+};
 pub use holds::{
     patterns_overlap, AcquireHolds, HeartbeatReport, Hold, HoldConflict, HoldFilter, HoldReport,
     SessionInfo, SessionPhase, SweepReport, DEFAULT_HOLD_TTL_SECONDS, MAX_HOLD_TTL_SECONDS,
