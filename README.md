@@ -2,7 +2,7 @@
 
 Free and open source, always: a local-first, vendor-neutral inbox (and later, resource registry) for coding agents. Claude Code, Grok, Codex, and others are treated equally via plain MCP + a shared CLI. Sibling agent-tools project under the [WyreUp](https://wyreup.com/) brand.
 
-**License:** [Apache-2.0](LICENSE) · **Status:** Milestone 1 implemented, in review (see checklist below)
+**License:** [Apache-2.0](LICENSE) · **Status:** Milestone 1 complete (local core; see checklist below)
 
 ## Status
 
@@ -16,7 +16,7 @@ Milestone 1 (local core) — scope in [AGENTS.md](AGENTS.md):
 - [x] Path holds: TTL + heartbeat, conflict report, sweeper expiry, release on `heartbeat --end`
 - [x] 9 MCP tools over `rmcp`: stdio and streamable HTTP, loopback-only binds
 - [x] Tests: register, send→inbox→ack, request claim→done, hold acquire→conflict→expire/release, MCP over stdio-style and HTTP transports, CLI
-- [ ] CI green on the Milestone 1 PR (test + clippy + fmt)
+- [x] CI green (test + clippy + fmt)
 
 Not in Milestone 1: resource registry, activity feed, federation, web UI/TUI, Herdr plugin, hook pack installers (the hook contract is documented in [docs/HOOKS.md](docs/HOOKS.md)).
 
