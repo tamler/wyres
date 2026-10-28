@@ -41,3 +41,18 @@ jobs:
       - name: cargo test
         if: hashFiles('Cargo.toml') != ''
         run: cargo test --all-features
+
+  msrv:
+    name: msrv (Rust 1.88)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.88
+        uses: dtolnay/rust-toolchain@1.88
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo check
+        run: cargo check --workspace --all-targets --locked
