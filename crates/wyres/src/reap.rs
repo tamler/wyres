@@ -147,6 +147,14 @@ pub fn plan(store: &Store, target: &str, grace_seconds: i64) -> anyhow::Result<R
     } else {
         let resource = store.resource(&ResourceRef::parse(target)?)?;
         plan.resource_id = Some(resource.resource_id.clone());
+        if let Some(node) = &resource.node {
+            plan.blockers.push(format!(
+                "{} belongs to node {node}; reaping happens only on the owning node",
+                resource.name
+            ));
+            plan.eligible = false;
+            return Ok(plan);
+        }
         plan.pid = resource.pid;
         if resource.status != "lapsed" {
             plan.blockers.push(format!(

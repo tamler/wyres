@@ -187,6 +187,8 @@ pub struct HoldPathsArgs {
 pub struct HoldPathsOut {
     pub granted: Vec<Hold>,
     pub conflicts: Vec<HoldConflict>,
+    /// Overlapping holds on other nodes (same project name): warnings, never blocking.
+    pub warnings: Vec<HoldConflict>,
     pub renewed: Vec<Hold>,
     pub released: Vec<String>,
     pub holds: Vec<Hold>,
@@ -257,6 +259,9 @@ pub struct ResourceFindArgs {
     pub project: Option<String>,
     #[serde(default)]
     pub include_released: bool,
+    /// Only resources owned by this node (default includes other nodes' resources).
+    #[serde(default)]
+    pub local_only: bool,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -488,6 +493,7 @@ impl WyresMcp {
                     })?;
                     out.granted = report.granted;
                     out.conflicts = report.conflicts;
+                    out.warnings = report.warnings;
                 }
                 HoldAction::Check => {
                     out.conflicts = s.check_holds(
@@ -585,6 +591,7 @@ impl WyresMcp {
                     query: a.query,
                     project: a.project,
                     include_released: a.include_released,
+                    local_only: a.local_only,
                 })?,
             })
         })

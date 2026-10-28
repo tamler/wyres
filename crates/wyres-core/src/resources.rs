@@ -139,6 +139,10 @@ pub struct Resource {
     pub lapsed_since: Option<String>,
     pub metadata: Value,
     pub created_at: String,
+    /// Owning node's name, for resources on other nodes (federation).
+    pub node: Option<String>,
+    /// For resources on other nodes: whether this machine can connect to it.
+    pub reachable: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -149,6 +153,8 @@ pub struct ResourceFilter {
     pub project: Option<String>,
     /// Include released resources too.
     pub include_released: bool,
+    /// Only resources owned by this node (default: include other nodes' resources).
+    pub local_only: bool,
 }
 
 /// Which resource an operation targets: an id, or `kind` + `name`.
@@ -213,7 +219,9 @@ fn validate_name(name: &str) -> Result<()> {
 
 const RESOURCE_COLUMNS: &str =
     "r.resource_id, r.node_id, r.kind, r.name, r.endpoint, r.port, r.pid,
-    p.slug, r.purpose, r.mode, r.metadata, r.created_at, r.released_at, r.lapsed_at";
+    p.slug, r.purpose, r.mode, r.metadata, r.created_at, r.released_at, r.lapsed_at,
+    (SELECT CASE WHEN n.is_local = 1 THEN NULL ELSE n.display_name END
+     FROM nodes n WHERE n.node_id = r.node_id)";
 
 struct Row0 {
     resource: Resource,
@@ -250,6 +258,8 @@ fn resource_from_row(r: &Row<'_>) -> rusqlite::Result<Row0> {
             lapsed_since: None,
             metadata: serde_json::from_str(&metadata).unwrap_or(Value::Null),
             created_at: fmt_ts(r.get(11)?),
+            node: r.get(14)?,
+            reachable: None,
         },
         released: released_at.is_some(),
         lapsed_at,
@@ -259,16 +269,18 @@ fn resource_from_row(r: &Row<'_>) -> rusqlite::Result<Row0> {
 fn live_leases(
     conn: &Connection,
     resource_id: &str,
+    now: i64,
 ) -> Result<Vec<(String, String, String, Lease)>> {
     let mut stmt = conn.prepare(
-        "SELECT l.lease_id, l.agent_id, a.name, p.slug, l.role, l.expires_at
+        "SELECT l.lease_id, l.agent_id, a.address, NULL, l.role, l.expires_at
          FROM resource_leases l
          JOIN agents a ON a.agent_id = l.agent_id
          LEFT JOIN projects p ON p.project_id = a.project_id
          WHERE l.resource_id = ?1 AND l.released_at IS NULL
+           AND (l.node_id = (SELECT node_id FROM nodes WHERE is_local = 1) OR l.expires_at > ?2)
          ORDER BY CASE l.role WHEN 'owner' THEN 0 ELSE 1 END, l.created_at, l.rowid",
     )?;
-    let rows = stmt.query_map([resource_id], |r| {
+    let rows = stmt.query_map(params![resource_id, now], |r| {
         let lease_id: String = r.get(0)?;
         let agent_id: String = r.get(1)?;
         let addr = address(
@@ -291,9 +303,9 @@ fn live_leases(
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-fn hydrate(conn: &Connection, row: Row0) -> Result<Resource> {
+fn hydrate(conn: &Connection, row: Row0, now: i64) -> Result<Resource> {
     let mut res = row.resource;
-    let leases = live_leases(conn, &res.resource_id)?;
+    let leases = live_leases(conn, &res.resource_id, now)?;
     res.owner = leases
         .iter()
         .find(|(_, _, role, _)| role == "owner")
@@ -316,7 +328,7 @@ fn hydrate(conn: &Connection, row: Row0) -> Result<Resource> {
     Ok(res)
 }
 
-pub(crate) fn get_resource(conn: &Connection, resource_id: &str) -> Result<Resource> {
+pub(crate) fn get_resource(conn: &Connection, resource_id: &str, now: i64) -> Result<Resource> {
     let row = conn
         .query_row(
             &format!(
@@ -328,7 +340,7 @@ pub(crate) fn get_resource(conn: &Connection, resource_id: &str) -> Result<Resou
         )
         .optional()?
         .ok_or_else(|| Error::NotFound(format!("unknown resource {resource_id:?}")))?;
-    hydrate(conn, row)
+    hydrate(conn, row, now)
 }
 
 /// Resolve a reference to a resource id that is not released.
@@ -361,12 +373,12 @@ fn resolve(conn: &Connection, node_id: &str, target: &ResourceRef) -> Result<Str
 
 fn add_lease(
     tx: &Tx<'_>,
+    lease_id: &str,
     resource_id: &str,
     agent: &AgentRef,
     role: &str,
     ttl: i64,
-) -> Result<String> {
-    let lease_id = new_id();
+) -> Result<()> {
     tx.execute(
         "INSERT INTO resource_leases (lease_id, resource_id, node_id, agent_id, role, ttl_seconds,
            created_at, renewed_at, expires_at)
@@ -386,13 +398,46 @@ fn add_lease(
         "UPDATE resources SET lapsed_at = NULL WHERE resource_id = ?1",
         [resource_id],
     )?;
-    Ok(lease_id)
+    Ok(())
+}
+
+fn resource_node(tx: &Tx<'_>, resource_id: &str) -> Result<String> {
+    Ok(tx.query_row(
+        "SELECT node_id FROM resources WHERE resource_id = ?1",
+        [resource_id],
+        |r| r.get(0),
+    )?)
+}
+
+/// Other nodes owning the resources behind these leases (so they hear about renewals).
+fn foreign_nodes_for(tx: &Tx<'_>, lease_ids: &[&String]) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    for id in lease_ids {
+        let node: Option<String> = tx
+            .query_row(
+                "SELECT r.node_id FROM resource_leases l
+                 JOIN resources r ON r.resource_id = l.resource_id WHERE l.lease_id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(n) = node.filter(|n| n != tx.node_id) {
+            if !out.contains(&n) {
+                out.push(n);
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// After leases end: promote the oldest borrower if the owner is gone, and stamp
 /// `lapsed_at` when nothing is left.
 fn settle(tx: &Tx<'_>, resource_id: &str, actor: &str, when: i64) -> Result<Option<String>> {
-    let leases = live_leases(tx, resource_id)?;
+    if resource_node(tx, resource_id)? != tx.node_id {
+        // Ownership of another node's resource is decided there.
+        return Ok(None);
+    }
+    let leases = live_leases(tx, resource_id, tx.now)?;
     if leases.is_empty() {
         tx.execute(
             "UPDATE resources SET lapsed_at = coalesce(lapsed_at, ?2) WHERE resource_id = ?1",
@@ -428,7 +473,7 @@ fn my_lease(tx: &Tx<'_>, resource_id: &str, agent_id: &str) -> Result<Option<(St
 }
 
 fn outcome(tx: &Tx<'_>, resource_id: &str, agent_id: &str, what: &str) -> Result<LeaseOutcome> {
-    let resource = get_resource(tx, resource_id)?;
+    let resource = get_resource(tx, resource_id, tx.now)?;
     let lease = match my_lease(tx, resource_id, agent_id)? {
         Some((lease_id, _)) => resource
             .leases
@@ -495,11 +540,12 @@ pub(crate) fn session_leases_tx(tx: &Tx<'_>, agent: &AgentRef, release: bool) ->
         return Ok(0);
     }
     let ids: Vec<&String> = leases.iter().map(|(id, _, _)| id).collect();
+    let nodes = foreign_nodes_for(tx, &ids)?;
     if release {
         tx.emit(
             &agent.address,
             "resource.released",
-            json!({ "lease_ids": ids, "reason": "session_end" }),
+            json!({ "lease_ids": ids, "reason": "session_end", "resource_nodes": nodes }),
         )?;
         for (lease_id, resource_id, _) in &leases {
             tx.execute(
@@ -513,7 +559,7 @@ pub(crate) fn session_leases_tx(tx: &Tx<'_>, agent: &AgentRef, release: bool) ->
         tx.emit(
             &agent.address,
             "resource.renewed",
-            json!({ "lease_ids": ids }),
+            json!({ "lease_ids": ids, "resource_nodes": nodes }),
         )?;
         for (lease_id, _, ttl) in &leases {
             tx.execute(
@@ -552,8 +598,9 @@ impl Store {
                 .or_else(|| input.endpoint.as_deref().and_then(derive_port))
                 .or_else(|| derive_port(&input.name));
             let target = ResourceRef::Name(input.kind, input.name.clone());
+            let lease_id = new_id();
             if let Ok(existing) = resolve(tx, tx.node_id, &target) {
-                let current = get_resource(tx, &existing)?;
+                let current = get_resource(tx, &existing, tx.now)?;
                 if current.refcount > 0 {
                     return Err(Error::Conflict(format!(
                         "{}:{} is already registered (resource {}, owner {}); borrow it instead",
@@ -566,7 +613,14 @@ impl Store {
                 tx.emit(
                     &me.address,
                     "resource.adopted",
-                    json!({ "resource_id": existing, "kind": input.kind.as_str(), "name": input.name }),
+                    json!({
+                        "resource_id": existing,
+                        "kind": input.kind.as_str(),
+                        "name": input.name,
+                        "lease_id": lease_id,
+                        "agent_id": me.id,
+                        "ttl_seconds": ttl,
+                    }),
                 )?;
                 tx.execute(
                     "UPDATE resources SET endpoint = coalesce(?2, endpoint), port = coalesce(?3, port),
@@ -583,7 +637,7 @@ impl Store {
                         project_id
                     ],
                 )?;
-                add_lease(tx, &existing, &me, "owner", ttl)?;
+                add_lease(tx, &lease_id, &existing, &me, "owner", ttl)?;
                 touch(tx, &me.id)?;
                 return outcome(tx, &existing, &me.id, "adopted");
             }
@@ -603,6 +657,8 @@ impl Store {
                     "mode": input.mode.as_str(),
                     "ttl_seconds": ttl,
                     "metadata": metadata,
+                    "lease_id": lease_id,
+                    "owner_id": me.id,
                 }),
             )?;
             tx.execute(
@@ -625,7 +681,7 @@ impl Store {
                     event_id
                 ],
             )?;
-            add_lease(tx, &resource_id, &me, "owner", ttl)?;
+            add_lease(tx, &lease_id, &resource_id, &me, "owner", ttl)?;
             touch(tx, &me.id)?;
             outcome(tx, &resource_id, &me.id, "registered")
         })
@@ -634,6 +690,7 @@ impl Store {
     /// Find registered resources (live and lapsed by default), newest first.
     pub fn find_resources(&self, filter: ResourceFilter) -> Result<Vec<Resource>> {
         self.sweep()?;
+        let now = self.now();
         self.read(|conn| {
             let project_id = match &filter.project {
                 Some(p) => Some(find_project(conn, self.node_id(), p)?.project_id),
@@ -642,7 +699,7 @@ impl Store {
             let mut stmt = conn.prepare(&format!(
                 "SELECT {RESOURCE_COLUMNS} FROM resources r
                  LEFT JOIN projects p ON p.project_id = r.project_id
-                 WHERE r.node_id = ?1 AND (?2 IS NULL OR r.kind = ?2)
+                 WHERE (r.node_id = ?1 OR NOT ?6) AND (?2 IS NULL OR r.kind = ?2)
                    AND (?3 IS NULL OR r.project_id = ?3)
                    AND (?4 OR r.released_at IS NULL)
                    AND (?5 IS NULL OR instr(lower(r.name || ' ' || ifnull(r.endpoint, '') || ' ' ||
@@ -656,22 +713,35 @@ impl Store {
                         filter.kind.map(|k| k.as_str()),
                         project_id,
                         filter.include_released,
-                        filter.query
+                        filter.query,
+                        filter.local_only
                     ],
                     resource_from_row,
                 )?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
-            rows.into_iter().map(|r| hydrate(conn, r)).collect()
+            rows.into_iter()
+                .map(|r| {
+                    let mut res = hydrate(conn, r, now)?;
+                    if res.node.is_some() && res.status == "live" {
+                        res.reachable = Some(crate::federation::reachable(
+                            res.endpoint.as_deref(),
+                            res.port,
+                        ));
+                    }
+                    Ok(res)
+                })
+                .collect()
         })
     }
 
     pub fn resource(&self, target: &ResourceRef) -> Result<Resource> {
+        let now = self.now();
         self.read(|conn| {
             let id = match target {
                 ResourceRef::Id(id) => id.clone(),
                 other => resolve(conn, self.node_id(), other)?,
             };
-            get_resource(conn, &id)
+            get_resource(conn, &id, now)
         })
     }
 
@@ -688,11 +758,19 @@ impl Store {
             crate::holds::sweep_tx(tx)?;
             let me = resolve_agent(tx, tx.node_id, agent)?;
             let rid = resolve(tx, tx.node_id, target)?;
+            let owner_node = resource_node(tx, &rid)?;
+            let foreign = owner_node != tx.node_id;
+            let node_field = foreign.then(|| owner_node.clone());
             if let Some((lease_id, _)) = my_lease(tx, &rid, &me.id)? {
                 tx.emit(
                     &me.address,
                     "resource.renewed",
-                    json!({ "lease_ids": [lease_id] }),
+                    json!({
+                        "resource_id": rid,
+                        "lease_ids": [lease_id],
+                        "ttl_seconds": ttl,
+                        "resource_node": node_field,
+                    }),
                 )?;
                 tx.execute(
                     "UPDATE resource_leases SET ttl_seconds = ?2, renewed_at = ?3,
@@ -702,14 +780,36 @@ impl Store {
                 touch(tx, &me.id)?;
                 return outcome(tx, &rid, &me.id, "renewed");
             }
-            let current = get_resource(tx, &rid)?;
-            if current.refcount == 0 {
+            let current = get_resource(tx, &rid, tx.now)?;
+            if foreign {
+                crate::federation::allowed_towards(
+                    tx,
+                    &owner_node,
+                    crate::federation::Perm::BorrowResource,
+                )?;
+                let node = current.node.clone().unwrap_or_else(|| owner_node.clone());
+                if current.refcount == 0 {
+                    return Err(Error::Conflict(format!(
+                        "{} {} on node {node} has no live owner; it can only be adopted there",
+                        current.kind.as_str(),
+                        current.name
+                    )));
+                }
+                if !crate::federation::reachable(current.endpoint.as_deref(), current.port) {
+                    return Err(Error::Conflict(format!(
+                        "{} {} on node {node} is not reachable from this machine",
+                        current.kind.as_str(),
+                        current.name
+                    )));
+                }
+            } else if current.refcount == 0 {
+                let lease_id = new_id();
                 tx.emit(
                     &me.address,
                     "resource.adopted",
-                    json!({ "resource_id": rid }),
+                    json!({ "resource_id": rid, "lease_id": lease_id, "agent_id": me.id, "ttl_seconds": ttl }),
                 )?;
-                add_lease(tx, &rid, &me, "owner", ttl)?;
+                add_lease(tx, &lease_id, &rid, &me, "owner", ttl)?;
                 touch(tx, &me.id)?;
                 return outcome(tx, &rid, &me.id, "adopted");
             }
@@ -721,12 +821,19 @@ impl Store {
                     current.owner.as_deref().unwrap_or("its owner")
                 )));
             }
+            let lease_id = new_id();
             tx.emit(
                 &me.address,
                 "resource.borrowed",
-                json!({ "resource_id": rid, "ttl_seconds": ttl }),
+                json!({
+                    "resource_id": rid,
+                    "lease_id": lease_id,
+                    "agent_id": me.id,
+                    "ttl_seconds": ttl,
+                    "resource_node": node_field,
+                }),
             )?;
-            add_lease(tx, &rid, &me, "borrower", ttl)?;
+            add_lease(tx, &lease_id, &rid, &me, "borrower", ttl)?;
             touch(tx, &me.id)?;
             outcome(tx, &rid, &me.id, "borrowed")
         })
@@ -746,7 +853,16 @@ impl Store {
             let me = resolve_agent(tx, tx.node_id, agent)?;
             let rid = resolve(tx, tx.node_id, target)?;
             let mine = my_lease(tx, &rid, &me.id)?;
-            let current = get_resource(tx, &rid)?;
+            let current = get_resource(tx, &rid, tx.now)?;
+            let owner_node = resource_node(tx, &rid)?;
+            let node_field = (owner_node != tx.node_id).then(|| owner_node.clone());
+            if stopped && node_field.is_some() {
+                return Err(Error::Forbidden(format!(
+                    "{} belongs to node {}; only that node can mark it stopped",
+                    current.name,
+                    current.node.as_deref().unwrap_or(&owner_node)
+                )));
+            }
             if stopped {
                 let owner_ok =
                     mine.as_ref().is_some_and(|(_, role)| role == "owner") || current.refcount == 0;
@@ -784,7 +900,12 @@ impl Store {
             tx.emit(
                 &me.address,
                 "resource.released",
-                json!({ "resource_id": rid, "lease_ids": [lease_id], "reason": "released" }),
+                json!({
+                    "resource_id": rid,
+                    "lease_ids": [lease_id],
+                    "reason": "released",
+                    "resource_node": node_field,
+                }),
             )?;
             tx.execute(
                 "UPDATE resource_leases SET released_at = ?2, release_reason = 'released'
@@ -843,7 +964,12 @@ impl Store {
             }
             if !selected.is_empty() {
                 let ids: Vec<&String> = selected.iter().map(|(l, _, _)| l).collect();
-                tx.emit(&me.address, "resource.renewed", json!({ "lease_ids": ids }))?;
+                let nodes = foreign_nodes_for(tx, &ids)?;
+                tx.emit(
+                    &me.address,
+                    "resource.renewed",
+                    json!({ "lease_ids": ids, "resource_nodes": nodes }),
+                )?;
             }
             for (lease_id, _, ttl) in &selected {
                 tx.execute(
@@ -855,14 +981,17 @@ impl Store {
             touch(tx, &me.id)?;
             selected
                 .iter()
-                .map(|(_, rid, _)| get_resource(tx, rid))
+                .map(|(_, rid, _)| get_resource(tx, rid, tx.now))
                 .collect()
         })
     }
 
     /// Registered resources with no live lease (orphan candidates), oldest lapse first.
     pub fn lapsed_resources(&self) -> Result<Vec<Resource>> {
-        let mut all = self.find_resources(ResourceFilter::default())?;
+        let mut all = self.find_resources(ResourceFilter {
+            local_only: true,
+            ..Default::default()
+        })?;
         all.retain(|r| r.status == "lapsed");
         all.sort_by(|a, b| a.lapsed_since.cmp(&b.lapsed_since));
         Ok(all)

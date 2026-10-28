@@ -410,7 +410,31 @@ fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
                 json!({ "token_id": s("token_id") }),
             )
         }
+        "node.renamed" => (
+            format!("node renamed to {}", s("display_name")),
+            json!({ "node_id": s("node_id") }),
+        ),
+        "peer.paired" => (
+            format!("paired with node {} ({})", s("display_name"), s("role")),
+            json!({ "node_id": s("node_id") }),
+        ),
+        "peer.revoked" => (
+            format!("unpaired node {}", s("node_id")),
+            json!({ "node_id": s("node_id") }),
+        ),
         other => (format!("{actor}: {other}"), p.clone()),
+    };
+    // Merged feed: events from other nodes carry their node's name.
+    let foreign: Option<String> = conn
+        .query_row(
+            "SELECT display_name FROM nodes WHERE node_id = ?1 AND is_local = 0",
+            [&row.node_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let summary = match foreign {
+        Some(node) => format!("[{node}] {summary}"),
+        None => summary,
     };
     Ok(ActivityItem {
         category: ActivityKind::of_event(&row.kind),
@@ -477,7 +501,7 @@ fn project_slug(conn: &Connection, id: &str) -> Result<String> {
 fn agent_address(conn: &Connection, id: &str) -> Result<String> {
     Ok(conn
         .query_row(
-            "SELECT a.name, p.slug FROM agents a
+            "SELECT a.address, NULL FROM agents a
              LEFT JOIN projects p ON p.project_id = a.project_id WHERE a.agent_id = ?1",
             [id],
             |r| {
@@ -622,7 +646,7 @@ impl Store {
                 .collect::<Result<Vec<_>>>()?;
 
             let mut stmt = conn.prepare(
-                "SELECT a.name, p.slug, a.program, a.status, a.last_seen_at FROM agents a
+                "SELECT a.address, NULL, a.program, a.status, a.last_seen_at FROM agents a
                  LEFT JOIN projects p ON p.project_id = a.project_id
                  WHERE a.node_id = ?1 AND (a.status = 'active' OR a.last_seen_at >= ?2)
                  ORDER BY a.last_seen_at DESC",

@@ -58,6 +58,7 @@ pub struct Store {
 struct Inner {
     conn: Mutex<Connection>,
     node_id: String,
+    key: ed25519_dalek::SigningKey,
     clock: Clock,
     path: Option<PathBuf>,
 }
@@ -69,6 +70,10 @@ pub struct NodeInfo {
     pub display_name: String,
     pub role: String,
     pub created_at: String,
+    /// Ed25519 public key (base64url).
+    pub public_key: String,
+    /// Short form of the public key, for comparing out of band when pairing.
+    pub fingerprint: String,
 }
 
 /// One record of the append-only event log.
@@ -113,11 +118,12 @@ impl Store {
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         migrate(&mut conn)?;
-        let node_id = ensure_local_node(&mut conn, clock.now())?;
+        let (node_id, key) = ensure_local_node(&mut conn, clock.now())?;
         Ok(Store {
             inner: Arc::new(Inner {
                 conn: Mutex::new(conn),
                 node_id,
+                key,
                 clock,
                 path,
             }),
@@ -126,6 +132,10 @@ impl Store {
 
     pub fn node_id(&self) -> &str {
         &self.inner.node_id
+    }
+
+    pub(crate) fn signing_key(&self) -> &ed25519_dalek::SigningKey {
+        &self.inner.key
     }
 
     pub fn db_path(&self) -> Option<&Path> {
@@ -139,14 +149,18 @@ impl Store {
     pub fn node(&self) -> Result<NodeInfo> {
         self.read(|conn| {
             Ok(conn.query_row(
-                "SELECT node_id, display_name, role, created_at FROM nodes WHERE node_id = ?1",
+                "SELECT node_id, display_name, role, created_at, public_key FROM nodes
+                 WHERE node_id = ?1",
                 [self.node_id()],
                 |r| {
+                    let public_key: String = r.get::<_, Option<String>>(4)?.unwrap_or_default();
                     Ok(NodeInfo {
                         node_id: r.get(0)?,
                         display_name: r.get(1)?,
                         role: r.get(2)?,
                         created_at: fmt_ts(r.get(3)?),
+                        fingerprint: crate::crypto::fingerprint(&public_key),
+                        public_key,
                     })
                 },
             )?)
@@ -192,6 +206,7 @@ impl Store {
             tx,
             node_id: &self.inner.node_id,
             now: self.inner.clock.now(),
+            key: &self.inner.key,
         };
         let out = f(&ctx)?;
         ctx.tx.commit()?;
@@ -213,6 +228,7 @@ pub(crate) struct Tx<'a> {
     pub tx: rusqlite::Transaction<'a>,
     pub node_id: &'a str,
     pub now: i64,
+    pub key: &'a ed25519_dalek::SigningKey,
 }
 
 impl std::ops::Deref for Tx<'_> {
@@ -233,17 +249,23 @@ impl Tx<'_> {
             )
             .optional()?;
         let event_id = new_id();
+        let payload = payload.to_string();
+        let sig = crate::crypto::sign(
+            self.key,
+            &crate::crypto::event_message(&event_id, self.node_id, self.now, actor, kind, &payload),
+        );
         self.execute(
-            "INSERT INTO events (event_id, node_id, ts, actor, kind, payload, prev_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO events (event_id, node_id, ts, actor, kind, payload, prev_id, sig)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 event_id,
                 self.node_id,
                 self.now,
                 actor,
                 kind,
-                payload.to_string(),
-                prev_id
+                payload,
+                prev_id,
+                sig
             ],
         )?;
         Ok(event_id)
@@ -430,6 +452,36 @@ CREATE TABLE audit_log (
     remote    TEXT
 );
 "#,
+    r#"
+ALTER TABLE nodes ADD COLUMN public_key TEXT;
+ALTER TABLE nodes ADD COLUMN secret_key TEXT;
+ALTER TABLE events ADD COLUMN sig TEXT;
+ALTER TABLE agents ADD COLUMN address TEXT;
+UPDATE agents SET address = name || coalesce(
+    '@' || (SELECT slug FROM projects p WHERE p.project_id = agents.project_id), '');
+
+CREATE TABLE peers (
+    node_id      TEXT PRIMARY KEY REFERENCES nodes(node_id),
+    role         TEXT NOT NULL,
+    url          TEXT,
+    perms        TEXT NOT NULL,
+    paired_at    INTEGER NOT NULL,
+    push_cursor  INTEGER NOT NULL DEFAULT 0,
+    pull_cursor  INTEGER NOT NULL DEFAULT 0,
+    last_sync_at INTEGER,
+    revoked_at   INTEGER
+);
+
+CREATE TABLE invites (
+    invite_id   TEXT PRIMARY KEY,
+    secret_hash TEXT NOT NULL,
+    perms       TEXT NOT NULL,
+    created_at  INTEGER NOT NULL,
+    expires_at  INTEGER NOT NULL,
+    used_at     INTEGER,
+    used_by     TEXT
+);
+"#,
 ];
 
 fn migrate(conn: &mut Connection) -> Result<()> {
@@ -450,35 +502,100 @@ fn migrate(conn: &mut Connection) -> Result<()> {
     Ok(())
 }
 
-fn ensure_local_node(conn: &mut Connection, now: i64) -> Result<String> {
+fn ensure_local_node(
+    conn: &mut Connection,
+    now: i64,
+) -> Result<(String, ed25519_dalek::SigningKey)> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let existing: Option<String> = tx
-        .query_row("SELECT node_id FROM nodes WHERE is_local = 1", [], |r| {
-            r.get(0)
-        })
+    let existing: Option<(String, Option<String>)> = tx
+        .query_row(
+            "SELECT node_id, secret_key FROM nodes WHERE is_local = 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
         .optional()?;
-    if let Some(id) = existing {
-        return Ok(id);
+    if let Some((node_id, secret)) = existing {
+        let key = match secret {
+            Some(s) => crate::crypto::decode_secret(&s)?,
+            None => {
+                // Databases created before node keys existed: create one now and sign the
+                // events this node already authored.
+                let key = crate::crypto::generate_key()?;
+                tx.execute(
+                    "UPDATE nodes SET secret_key = ?2, public_key = ?3 WHERE node_id = ?1",
+                    params![
+                        node_id,
+                        crate::crypto::b64(key.as_bytes()),
+                        crate::crypto::public_of(&key)
+                    ],
+                )?;
+                key
+            }
+        };
+        sign_unsigned(&tx, &node_id, &key)?;
+        tx.commit()?;
+        return Ok((node_id, key));
     }
     let node_id = new_id();
+    let key = crate::crypto::generate_key()?;
     let display_name = std::env::var("WYRES_NODE_NAME").unwrap_or_else(|_| "local".to_string());
     tx.execute(
-        "INSERT INTO nodes (node_id, display_name, role, is_local, created_at)
-         VALUES (?1, ?2, 'home', 1, ?3)",
-        params![node_id, display_name, now],
+        "INSERT INTO nodes (node_id, display_name, role, is_local, created_at, public_key, secret_key)
+         VALUES (?1, ?2, 'home', 1, ?3, ?4, ?5)",
+        params![
+            node_id,
+            display_name,
+            now,
+            crate::crypto::public_of(&key),
+            crate::crypto::b64(key.as_bytes())
+        ],
     )?;
     {
         let ctx = Tx {
             tx,
             node_id: &node_id,
             now,
+            key: &key,
         };
         ctx.emit(
             "system",
             "node.created",
-            serde_json::json!({ "node_id": node_id, "display_name": display_name, "role": "home" }),
+            serde_json::json!({
+                "node_id": node_id,
+                "display_name": display_name,
+                "role": "home",
+                "public_key": crate::crypto::public_of(&key),
+            }),
         )?;
         ctx.tx.commit()?;
     }
-    Ok(node_id)
+    Ok((node_id, key))
+}
+
+fn sign_unsigned(conn: &Connection, node_id: &str, key: &ed25519_dalek::SigningKey) -> Result<()> {
+    let mut stmt = conn.prepare(
+        "SELECT event_id, ts, actor, kind, payload FROM events WHERE node_id = ?1 AND sig IS NULL",
+    )?;
+    let rows = stmt
+        .query_map([node_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (event_id, ts, actor, kind, payload) in rows {
+        let sig = crate::crypto::sign(
+            key,
+            &crate::crypto::event_message(&event_id, node_id, ts, &actor, &kind, &payload),
+        );
+        conn.execute(
+            "UPDATE events SET sig = ?2 WHERE event_id = ?1",
+            params![event_id, sig],
+        )?;
+    }
+    Ok(())
 }

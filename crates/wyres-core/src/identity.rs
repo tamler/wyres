@@ -76,8 +76,11 @@ pub struct Agent {
     pub agent_id: String,
     pub node_id: String,
     pub name: String,
-    /// Address other agents use: `name` or `name@project`.
+    /// Address other agents use: `name` or `name@project` locally; `name@project@node`
+    /// (or `name@@node`) for agents on other nodes.
     pub address: String,
+    /// Home node display name, for agents on other nodes.
+    pub node: Option<String>,
     pub project: Option<String>,
     pub program: String,
     pub model: Option<String>,
@@ -103,11 +106,15 @@ pub struct RegisterAgent {
 pub(crate) struct AgentRef {
     pub id: String,
     pub address: String,
+    /// The agent's home node.
+    pub node_id: String,
 }
 
 pub(crate) const AGENT_COLUMNS: &str =
     "a.agent_id, a.node_id, a.name, p.slug, a.program, a.model, \
-     a.description, a.status, a.created_at, a.last_seen_at";
+     a.description, a.status, a.created_at, a.last_seen_at, a.address, \
+     (SELECT CASE WHEN n.is_local = 1 THEN NULL ELSE n.display_name END \
+      FROM nodes n WHERE n.node_id = a.node_id)";
 
 pub(crate) fn address(name: &str, slug: Option<&str>) -> String {
     match slug {
@@ -119,10 +126,12 @@ pub(crate) fn address(name: &str, slug: Option<&str>) -> String {
 pub(crate) fn agent_from_row(r: &Row<'_>) -> rusqlite::Result<Agent> {
     let name: String = r.get(2)?;
     let slug: Option<String> = r.get(3)?;
+    let stored: Option<String> = r.get(10)?;
     Ok(Agent {
         agent_id: r.get(0)?,
         node_id: r.get(1)?,
-        address: address(&name, slug.as_deref()),
+        address: stored.unwrap_or_else(|| address(&name, slug.as_deref())),
+        node: r.get(11)?,
         name,
         project: slug,
         program: r.get(4)?,
@@ -280,15 +289,39 @@ pub(crate) fn find_project(conn: &Connection, node_id: &str, key: &str) -> Resul
     })
 }
 
-/// Resolve `name` or `name@project` to a single agent on this node.
+/// Resolve an acting agent (must live on this node). Addresses: `name` or `name@project` on this node, or
+/// `name@project@node` / `name@@node` (and `name@node` when no local project matches) for
+/// agents on other nodes.
 pub(crate) fn resolve_agent(conn: &Connection, node_id: &str, who: &str) -> Result<AgentRef> {
+    let agent = resolve_any(conn, node_id, who)?;
+    if agent.node_id != node_id {
+        return Err(Error::Forbidden(format!(
+            "{} belongs to another node; agents act only on their own node",
+            agent.address
+        )));
+    }
+    Ok(agent)
+}
+
+/// Resolve an address on any known node (recipients, filters). See [`resolve_agent`] for
+/// identities that act.
+pub(crate) fn resolve_any(conn: &Connection, node_id: &str, who: &str) -> Result<AgentRef> {
     let who = who.trim();
-    let (name, project) = match who.split_once('@') {
-        Some((n, p)) => (n, Some(p)),
-        None => (who, None),
+    let parts: Vec<&str> = who.split('@').collect();
+    if parts.len() == 3 {
+        return resolve_remote(conn, who, parts[0], Some(parts[1]), parts[2]);
+    }
+    let (name, project) = match parts.as_slice() {
+        [n] => (*n, None),
+        [n, p] => (*n, Some(*p)),
+        _ => {
+            return Err(Error::Invalid(format!(
+                "invalid agent address {who:?}: use name, name@project or name@project@node"
+            )))
+        }
     };
     let mut stmt = conn.prepare(
-        "SELECT a.agent_id, a.name, p.slug, p.abs_path FROM agents a
+        "SELECT a.agent_id, a.address, p.slug, p.abs_path FROM agents a
          LEFT JOIN projects p ON p.project_id = a.project_id
          WHERE a.node_id = ?1 AND a.name = ?2",
     )?;
@@ -310,19 +343,55 @@ pub(crate) fn resolve_agent(conn: &Connection, node_id: &str, who: &str) -> Resu
         None => rows,
     };
     match candidates.as_slice() {
-        [] => Err(Error::NotFound(format!(
-            "unknown agent {who:?}; register it with register_agent first"
-        ))),
-        [(id, name, slug, _)] => Ok(AgentRef {
+        [] => match project {
+            // `name@node` for a project-less agent on another node.
+            Some(node) => resolve_remote(conn, who, name, Some(""), node),
+            None => Err(Error::NotFound(format!(
+                "unknown agent {who:?}; register it with register_agent first"
+            ))),
+        },
+        [(id, addr, _, _)] => Ok(AgentRef {
             id: id.clone(),
-            address: address(name, slug.as_deref()),
+            address: addr.clone(),
+            node_id: node_id.to_string(),
         }),
         many => Err(Error::Ambiguous(format!(
             "agent name {who:?} is ambiguous: it is registered in several projects; use name@project, one of: {}",
             many.iter()
-                .map(|(_, n, s, _)| address(n, s.as_deref()))
+                .map(|(_, a, _, _)| a.as_str())
                 .collect::<Vec<_>>()
                 .join(", ")
+        ))),
+    }
+}
+
+fn resolve_remote(
+    conn: &Connection,
+    who: &str,
+    name: &str,
+    project: Option<&str>,
+    node: &str,
+) -> Result<AgentRef> {
+    let row: Option<(String, String, String)> = conn
+        .query_row(
+            "SELECT a.agent_id, a.address, a.node_id FROM agents a
+             JOIN nodes n ON n.node_id = a.node_id
+             LEFT JOIN projects p ON p.project_id = a.project_id
+             WHERE a.name = ?1 AND (n.display_name = ?2 OR n.node_id = ?2)
+               AND ((?3 = '' AND a.project_id IS NULL) OR p.slug = ?3)
+             LIMIT 1",
+            params![name, node, project.unwrap_or("")],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    match row {
+        Some((id, address, node_id)) => Ok(AgentRef {
+            id,
+            address,
+            node_id,
+        }),
+        None => Err(Error::NotFound(format!(
+            "unknown agent {who:?}; register it with register_agent first (or sync with its node)"
         ))),
     }
 }
@@ -390,7 +459,8 @@ impl Store {
             if existing.is_some() {
                 tx.execute(
                     "UPDATE agents SET program = ?2, model = ?3, description = ?4,
-                       status = 'active', updated_at = ?5, last_seen_at = ?5, event_id = ?6
+                       status = 'active', updated_at = ?5, last_seen_at = ?5, event_id = ?6,
+                       address = ?7
                      WHERE agent_id = ?1",
                     params![
                         agent_id,
@@ -398,14 +468,15 @@ impl Store {
                         input.model,
                         input.description,
                         tx.now,
-                        event_id
+                        event_id,
+                        addr
                     ],
                 )?;
             } else {
                 tx.execute(
                     "INSERT INTO agents (agent_id, node_id, project_id, name, program, model,
-                       description, status, created_at, updated_at, last_seen_at, event_id)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'active', ?8, ?8, ?8, ?9)",
+                       description, status, created_at, updated_at, last_seen_at, event_id, address)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'active', ?8, ?8, ?8, ?9, ?10)",
                     params![
                         agent_id,
                         tx.node_id,
@@ -415,7 +486,8 @@ impl Store {
                         input.model,
                         input.description,
                         tx.now,
-                        event_id
+                        event_id,
+                        addr
                     ],
                 )?;
             }
@@ -423,10 +495,10 @@ impl Store {
         })
     }
 
-    /// Look up one agent by `name` or `name@project`.
+    /// Look up one agent by address (`name`, `name@project`, or `name@project@node`).
     pub fn agent(&self, who: &str) -> Result<Agent> {
         self.read(|conn| {
-            let r = resolve_agent(conn, self.node_id(), who)?;
+            let r = resolve_any(conn, self.node_id(), who)?;
             get_agent(conn, &r.id)
         })
     }

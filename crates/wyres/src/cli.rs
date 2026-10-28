@@ -64,6 +64,9 @@ pub enum Command {
         /// Extra Host header to accept, e.g. a tunnel hostname (repeatable; requires --auth).
         #[arg(long = "allowed-host", requires = "auth")]
         allowed_hosts: Vec<String>,
+        /// Act as a federation hub: serve /fed/* for paired spokes (node-signed requests).
+        #[arg(long)]
+        federation: bool,
         /// Seconds between sweeps that expire holds and stale requests.
         #[arg(long, default_value_t = 30)]
         sweep_secs: u64,
@@ -214,6 +217,9 @@ pub enum Command {
         /// Include released resources.
         #[arg(long)]
         all: bool,
+        /// Only resources owned by this node (default includes other nodes').
+        #[arg(long)]
+        local: bool,
     },
     /// Register a resource or renew resource leases.
     #[command(subcommand)]
@@ -263,6 +269,22 @@ pub enum Command {
         #[arg(long, default_value_t = 50)]
         limit: u32,
     },
+    /// Show or rename this node.
+    #[command(subcommand)]
+    Node(NodeCmd),
+    /// Pair nodes for federation: invite (hub), join (spoke), revoke.
+    #[command(subcommand)]
+    Pair(PairCmd),
+    /// List paired nodes.
+    Peers,
+    /// Spoke: push this node's events to the hub and pull everyone else's.
+    Sync {
+        /// Keep syncing every --every seconds.
+        #[arg(long)]
+        watch: bool,
+        #[arg(long, default_value_t = 30)]
+        every: u64,
+    },
     /// Show the activity feed (who is doing what), or a summary of it.
     Activity {
         /// Start point: a duration (30m, 2h, 1d), an RFC 3339 time, or an event id cursor.
@@ -287,6 +309,38 @@ pub enum Command {
         #[arg(long, default_value_t = 20)]
         limit: u32,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum NodeCmd {
+    /// Show this node's id, name and key fingerprint.
+    Show,
+    /// Rename this node (do this before pairing; names must be unique across nodes).
+    Name { name: String },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PairCmd {
+    /// Hub: print a single-use invite code for a spoke.
+    Invite {
+        /// URL spokes use to reach this hub (e.g. its tunnel URL).
+        #[arg(long)]
+        url: String,
+        /// Permissions for the spoke: read_feed, send_mail, borrow_resource (comma-separated).
+        #[arg(
+            long,
+            value_delimiter = ',',
+            default_value = "read_feed,send_mail,borrow_resource"
+        )]
+        perms: Vec<String>,
+        /// Invite lifetime: seconds or a duration like 30m, 24h.
+        #[arg(long, default_value = "1h")]
+        expires: String,
+    },
+    /// Spoke: redeem an invite code and record the hub.
+    Join { code: String },
+    /// Stop accepting (or using) a paired node, by name or id.
+    Revoke { node: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -608,6 +662,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         auth,
         allow_remote_bind,
         allowed_hosts,
+        federation,
         sweep_secs,
     } = &cli.command
     {
@@ -624,6 +679,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                     auth: *auth,
                     allow_remote_bind: *allow_remote_bind,
                     allowed_hosts: allowed_hosts.clone(),
+                    federation: *federation,
                 };
                 crate::serve::serve_http(store, bind, opts, every).await
             }
@@ -896,12 +952,14 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             query,
             project,
             all,
+            local,
         } => {
             let rs = store.find_resources(ResourceFilter {
                 kind: kind.map(|k| k.parse::<ResourceKind>()).transpose()?,
                 query,
                 project,
                 include_released: all,
+                local_only: local,
             })?;
             emit(json, &rs, |r| output::resources(r))
         }
@@ -1019,6 +1077,71 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 format!("revoked token {} ({})", t.token_id, t.agent)
             })
         }
+        Command::Node(NodeCmd::Show) => {
+            let n = store.node()?;
+            emit(json, &n, |n| {
+                format!(
+                    "node {} ({})\nkey fingerprint {}",
+                    n.display_name, n.node_id, n.fingerprint
+                )
+            })
+        }
+        Command::Node(NodeCmd::Name { name }) => {
+            let n = store.set_node_name(&name)?;
+            emit(json, &n, |n| format!("this node is now {}", n.display_name))
+        }
+        Command::Pair(PairCmd::Invite {
+            url,
+            perms,
+            expires,
+        }) => {
+            let perms = perms
+                .iter()
+                .map(|p| p.parse::<wyres_core::Perm>())
+                .collect::<Result<Vec<_>, _>>()?;
+            let code = store.create_invite(&url, &perms, parse_secs(&expires)?)?;
+            let node = store.node()?;
+            let out = serde_json::json!({ "code": code, "hub": node.display_name, "fingerprint": node.fingerprint });
+            emit(json, &out, |_| {
+                format!(
+                    "invite for hub {} (key {}), single use:\n\n{code}\n\nOn the spoke: wyres pair join <code>",
+                    node.display_name, node.fingerprint
+                )
+            })
+        }
+        Command::Pair(PairCmd::Join { code }) => {
+            let peer = crate::fed::join(&store, &code)?;
+            emit(json, &peer, |p| {
+                format!(
+                    "paired with hub {} at {} (key {}); run `wyres sync`",
+                    p.display_name,
+                    p.url.as_deref().unwrap_or("-"),
+                    p.fingerprint
+                )
+            })
+        }
+        Command::Pair(PairCmd::Revoke { node }) => {
+            let p = store.revoke_peer(&node)?;
+            emit(json, &p, |p| format!("revoked {}", p.display_name))
+        }
+        Command::Peers => {
+            let ps = store.peers()?;
+            emit(json, &ps, |p| output::peers(p))
+        }
+        Command::Sync { watch, every } => loop {
+            let report = crate::fed::sync(&store);
+            match report {
+                Ok(r) => {
+                    emit(json, &r, output::sync_report);
+                }
+                Err(e) if watch => eprintln!("wyres: sync failed: {e:#}"),
+                Err(e) => return Err(e),
+            }
+            if !watch {
+                break ExitCode::SUCCESS;
+            }
+            std::thread::sleep(Duration::from_secs(every.max(5)));
+        },
         Command::Audit { limit } => {
             let entries = store.audit_log(limit)?;
             emit(json, &entries, |e| output::audit(e))

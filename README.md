@@ -2,7 +2,7 @@
 
 Free and open source, always: a local-first, vendor-neutral inbox (and later, resource registry) for coding agents. Claude Code, Grok, Codex, and others are treated equally via plain MCP + a shared CLI. Sibling agent-tools project under the [WyreUp](https://wyreup.com/) brand.
 
-**License:** [Apache-2.0](LICENSE) · **Status:** Milestone 4 complete (authenticated remote peer)
+**License:** [Apache-2.0](LICENSE) · **Status:** Milestone 5 complete (federation v2)
 
 ## Status
 
@@ -11,8 +11,8 @@ Free and open source, always: a local-first, vendor-neutral inbox (and later, re
 | 1 | Local core: SQLite event log, agents, mail, requests, path holds, MCP (stdio + loopback HTTP), CLI | ✅ tamler/wyres#1 |
 | 2 | Mail checking: activity feed + summary, session events, hook packs (Claude Code, Codex, Grok CLI, Cursor best effort), `wyres hook install` | ✅ tamler/wyres#2 |
 | 3 | Resource registry: shared/exclusive leases, orphan scanner, human-approved reap | ✅ tamler/wyres#3 |
-| 4 | Authenticated remote peer (Grok Bot): scoped bearer tokens, audit log, `GET /activity`, tunnel guides | ✅ complete |
-| 5 | Federation (v2): pairing, hub-and-spoke sync, cross-node mail | planned |
+| 4 | Authenticated remote peer (Grok Bot): scoped bearer tokens, audit log, `GET /activity`, tunnel guides | ✅ tamler/wyres#4 |
+| 5 | Federation (v2): signed event logs, pairing, hub-and-spoke sync, cross-node mail, merged feed, remote resources | ✅ complete |
 | 6 | Polish: wake adapters, Herdr plugin, release builds | planned |
 
 Current milestone brief: [AGENTS.md](AGENTS.md). Every milestone merges only with CI green: test, clippy `-D warnings`, fmt, MSRV 1.88.
@@ -28,6 +28,7 @@ Current milestone brief: [AGENTS.md](AGENTS.md). Every milestone merges only wit
 | [docs/HOOKS.md](docs/HOOKS.md) | Hook pack install guide (Claude Code, Codex, Grok CLI, Cursor) |
 | [docs/RESOURCES.md](docs/RESOURCES.md) | Resource registry, orphans and human-approved reaping |
 | [docs/REMOTE.md](docs/REMOTE.md) | Remote peers (Grok Bot): tokens, `--auth`, tunnels, audit log |
+| [docs/FEDERATION.md](docs/FEDERATION.md) | Federation: node keys, pairing, sync, permissions, cross-node behaviour |
 
 ## Install
 
@@ -66,6 +67,22 @@ wyres serve --auth --bind 127.0.0.1:7467
 ```
 
 Expose the authenticated server through Tailscale Serve, Cloudflare Tunnel or `ssh -R`. Each token acts as one agent within its project globs, every remote call is audited (`wyres audit`), and reaping is never available remotely. See [docs/REMOTE.md](docs/REMOTE.md).
+
+## Several machines (federation)
+
+```bash
+wyres node name laptop
+```
+
+```bash
+wyres pair join wyres-invite:...
+```
+
+```bash
+wyres sync --watch
+```
+
+Each machine runs a node that is authoritative for its own agents, holds and resources. Spokes dial out to a self-hosted hub (`wyres serve --federation`) and exchange signed event logs: cross-node mail (`carol@@runner`), a merged activity feed, remote resources you can borrow when reachable, and hold-clash warnings. Permissions: `read_feed`, `send_mail`, `borrow_resource`; never remote reap. See [docs/FEDERATION.md](docs/FEDERATION.md).
 
 ## Connect an agent (MCP)
 
@@ -138,6 +155,11 @@ wyres orphans
 wyres token create --agent grok-bot --project '/work/*' --expires 30d
 wyres token list
 wyres audit --limit 20
+wyres node name laptop
+wyres pair invite --url https://hub.example --perms read_feed,send_mail   # on the hub
+wyres pair join <code>                                                     # on a spoke
+wyres peers
+wyres sync --watch --every 30
 wyres reap <resource-id|kind:name|pid:N>            # plan only
 wyres reap <resource-id|kind:name|pid:N> --confirm  # human confirmation
 wyres status
@@ -148,7 +170,7 @@ wyres events --limit 20
 
 ## Concepts
 
-- **Agents** are unique per project and addressed as `name@project`. A bare `name` works when only one agent has it; otherwise you get an `ambiguous` error listing the `name@project` choices.
+- **Agents** are unique per project and addressed as `name@project` (`name@project@node` on other nodes). A bare `name` works when only one agent has it; otherwise you get an `ambiguous` error listing the `name@project` choices.
 - **Mail** is immutable messages in threads. Each recipient has its own read/ack state. Importance is `low | normal | high | urgent`.
 - **Requests** are opened from a message and can be claimed by any agent (advisory ownership). Past their due time they go `stale`, and anyone may take them over. Completing a request mails the requester in the same thread.
 - **Holds** are advisory leases on project-relative paths or globs (`src/**`, `Cargo.toml`). Exclusive holds conflict with any overlapping hold of another agent; shared holds only conflict with exclusive ones. `acquire` is all-or-nothing. TTL defaults to 30 minutes (clamped to 1 minute – 4 hours); `heartbeat` renews it.
