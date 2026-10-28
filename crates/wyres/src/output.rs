@@ -1,0 +1,232 @@
+//! Human-readable rendering for CLI output (`--json` bypasses all of this).
+
+use std::fmt::Write;
+
+use serde::Serialize;
+use wyres_core::{
+    Agent, Event, HeartbeatReport, Hold, HoldConflict, HoldReport, Inbox, Message, NodeInfo,
+    Project, Request, Thread, ThreadSummary,
+};
+
+#[derive(Debug, Serialize)]
+pub struct Status {
+    pub node: NodeInfo,
+    pub db_path: String,
+    pub projects: Vec<Project>,
+    pub agents: Vec<Agent>,
+}
+
+pub fn status(s: &Status) -> String {
+    let mut out = format!(
+        "node      {} ({}, {})\ndatabase  {}\nprojects  {}\nagents    {}\n",
+        s.node.node_id,
+        s.node.display_name,
+        s.node.role,
+        s.db_path,
+        s.projects.len(),
+        s.agents.len()
+    );
+    if !s.agents.is_empty() {
+        out.push('\n');
+        out.push_str(&agents(&s.agents));
+    }
+    out
+}
+
+pub fn agents(agents: &[Agent]) -> String {
+    agents
+        .iter()
+        .map(|a| {
+            format!(
+                "{:<24} {:<9} {:<8} last seen {}\n",
+                a.address,
+                a.program,
+                a.status,
+                a.last_seen_at.as_deref().unwrap_or("never")
+            )
+        })
+        .collect()
+}
+
+pub fn sent(m: &Message) -> String {
+    let mut out = format!("sent {} to {}", m.message_id, m.to.join(", "));
+    if !m.cc.is_empty() {
+        let _ = write!(out, " (cc {})", m.cc.join(", "));
+    }
+    if let Some(r) = &m.request_id {
+        let _ = write!(out, "\nopened request {r}");
+    }
+    out
+}
+
+fn flag(m: &Message) -> &'static str {
+    match m.importance {
+        wyres_core::Importance::Urgent => "!!",
+        wyres_core::Importance::High => "! ",
+        _ => "  ",
+    }
+}
+
+pub fn inbox(i: &Inbox) -> String {
+    let mut out = format!(
+        "{}: {} unread ({} urgent), {} awaiting ack, {} request(s)\n",
+        i.agent,
+        i.unread,
+        i.urgent_unread,
+        i.awaiting_ack,
+        i.requests.len()
+    );
+    for item in &i.messages {
+        let m = &item.message;
+        let state = if item.read_at.is_none() {
+            "new"
+        } else if m.ack_required && item.acked_at.is_none() {
+            "ack?"
+        } else {
+            ""
+        };
+        let _ = writeln!(
+            out,
+            "{} {:<4} {}  {:<16} {}  [{}]",
+            flag(m),
+            state,
+            m.created_at,
+            m.from,
+            m.subject,
+            m.message_id
+        );
+    }
+    if !i.requests.is_empty() {
+        out.push_str("\nrequests:\n");
+        out.push_str(&requests(&i.requests));
+    }
+    out
+}
+
+pub fn threads(ts: &[ThreadSummary]) -> String {
+    ts.iter()
+        .map(|t| {
+            format!(
+                "{}  {:>3} msg {:>3} unread  {}  ({})  [{}]\n",
+                t.last_at,
+                t.messages,
+                t.unread,
+                t.subject,
+                t.participants.join(", "),
+                t.thread_id
+            )
+        })
+        .collect()
+}
+
+pub fn thread(t: &Thread) -> String {
+    let mut out = String::new();
+    for m in &t.messages {
+        let _ = writeln!(
+            out,
+            "{}{} {} -> {}  [{}]\n  {}\n",
+            flag(m).trim(),
+            m.created_at,
+            m.from,
+            m.to.join(", "),
+            m.message_id,
+            m.subject
+        );
+        for line in m.body.lines() {
+            let _ = writeln!(out, "  {line}");
+        }
+        out.push('\n');
+    }
+    out
+}
+
+pub fn requests(rs: &[Request]) -> String {
+    rs.iter()
+        .map(|r| {
+            let owner = r.owner.as_deref().unwrap_or("-");
+            let due = r
+                .due_at
+                .as_deref()
+                .map(|d| format!(" due {d}"))
+                .unwrap_or_default();
+            format!(
+                "{:<9} {:<16} {}  (from {}{due})  [{}]\n",
+                r.status.as_str(),
+                owner,
+                r.title,
+                r.created_by,
+                r.request_id
+            )
+        })
+        .collect()
+}
+
+pub fn holds(hs: &[Hold]) -> String {
+    hs.iter()
+        .map(|h| {
+            format!(
+                "{:<9} {:<16} {}:{}  until {}{}  [{}]\n",
+                if h.exclusive { "exclusive" } else { "shared" },
+                h.agent,
+                h.project,
+                h.pattern,
+                h.expires_at,
+                h.reason
+                    .as_deref()
+                    .map(|r| format!("  ({r})"))
+                    .unwrap_or_default(),
+                h.hold_id
+            )
+        })
+        .collect()
+}
+
+pub fn conflicts(cs: &[HoldConflict]) -> String {
+    cs.iter()
+        .map(|c| {
+            format!(
+                "conflict: {} is held by {} ({}, {} until {})\n",
+                c.path,
+                c.held.agent,
+                c.held.pattern,
+                if c.held.exclusive {
+                    "exclusive"
+                } else {
+                    "shared"
+                },
+                c.held.expires_at
+            )
+        })
+        .collect()
+}
+
+pub fn hold_report(r: &HoldReport) -> String {
+    if r.conflicts.is_empty() {
+        holds(&r.granted)
+    } else {
+        format!("nothing acquired\n{}", conflicts(&r.conflicts))
+    }
+}
+
+pub fn heartbeat(h: &HeartbeatReport) -> String {
+    let holds = if h.status == "offline" {
+        format!("released {} hold(s)", h.released_holds.len())
+    } else {
+        format!("renewed {} hold(s)", h.renewed_holds.len())
+    };
+    format!(
+        "{} {}: {holds}; {} unread ({} urgent), {} open request(s)",
+        h.agent, h.status, h.unread, h.urgent_unread, h.open_requests
+    )
+}
+
+pub fn events(es: &[Event]) -> String {
+    es.iter()
+        .map(|e| {
+            format!(
+                "{:>6} {}  {:<18} {:<16} {}\n",
+                e.seq, e.ts, e.kind, e.actor, e.event_id
+            )
+        })
+        .collect()
+}

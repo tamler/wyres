@@ -4,7 +4,7 @@
 
 ## Status
 
-Milestone 1: **in progress**. Keep the [README.md](README.md) status line accurate as you finish work (and when you open PRs).
+Milestone 1: **implemented, in review** (CI pending on the PR). Keep the [README.md](README.md) status line accurate as you finish work (and when you open PRs).
 
 ## Clean-room rules (mandatory)
 
@@ -61,13 +61,13 @@ CLI should mirror the same capabilities for humans/scripts (`wyres serve`, `wyre
 
 ### Definition of done (Milestone 1)
 
-- [ ] `cargo build --release` produces `wyres`
-- [ ] `wyres serve` starts local MCP (stdio and/or loopback streamable HTTP); refuses non-local binds without an explicit future flag (M1: local only)
-- [ ] Fresh install creates `~/.wyres` (or `$WYRES_HOME`) DB with `node_id` + event log
-- [ ] Integration or unit tests cover: register agent, send→inbox→ack, request claim→done, hold acquire→conflict→expire/release
+- [x] `cargo build --release` produces `wyres`
+- [x] `wyres serve` starts local MCP (stdio and/or loopback streamable HTTP); refuses non-local binds without an explicit future flag (M1: local only)
+- [x] Fresh install creates `~/.wyres` (or `$WYRES_HOME`) DB with `node_id` + event log
+- [x] Integration or unit tests cover: register agent, send→inbox→ack, request claim→done, hold acquire→conflict→expire/release
 - [ ] CI green: test + clippy + fmt
-- [ ] README status updated to reflect M1 completion (or “in progress” with accurate checklist)
-- [ ] No secrets, tokens, private emails/phones, or machine-specific absolute paths in the tree
+- [x] README status updated to reflect M1 completion (or “in progress” with accurate checklist)
+- [x] No secrets, tokens, private emails/phones, or machine-specific absolute paths in the tree
 
 ## Explicitly OUT of scope (do not build in M1)
 

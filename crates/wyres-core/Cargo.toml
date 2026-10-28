@@ -1,0 +1,22 @@
+[package]
+name = "wyres-core"
+description = "Wyres core: SQLite event log, agents, mail, requests, and path holds"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rusqlite.workspace = true
+ulid.workspace = true
+chrono.workspace = true
+globset.workspace = true
+schemars.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
