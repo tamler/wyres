@@ -104,7 +104,7 @@ async fn authenticate(
     uri: &Uri,
     headers: &HeaderMap,
     body: &[u8],
-) -> Result<String, Response> {
+) -> Result<String, Box<Response>> {
     let get = |h: &str| {
         headers
             .get(h)
@@ -113,7 +113,7 @@ async fn authenticate(
     };
     let (Some(node), Some(time), Some(sig)) = (get(H_NODE), get(H_TIME), get(H_SIG)) else {
         let e = wyres_core::Error::Forbidden("missing node signature headers".into());
-        return Err(error(StatusCode::UNAUTHORIZED, &e));
+        return Err(Box::new(error(StatusCode::UNAUTHORIZED, &e)));
     };
     let time: i64 = time.parse().unwrap_or_default();
     let path = uri
@@ -137,7 +137,7 @@ async fn authenticate(
                 e.to_string(),
             )
             .await;
-            Err(error(StatusCode::UNAUTHORIZED, &e))
+            Err(Box::new(error(StatusCode::UNAUTHORIZED, &e)))
         }
     }
 }
@@ -151,7 +151,7 @@ async fn push(
 ) -> Response {
     let node = match authenticate(&store, &method, &uri, &headers, &body).await {
         Ok(n) => n,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let req: PushRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
@@ -184,7 +184,7 @@ async fn pull(
 ) -> Response {
     let node = match authenticate(&store, &method, &uri, &headers, b"").await {
         Ok(n) => n,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let mut after = 0i64;
     let mut limit = BATCH;
