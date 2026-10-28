@@ -1,7 +1,8 @@
 //! Projects and agent identities.
 //!
-//! Agent names are global on a node. The same name may be registered once per project
-//! (and once without a project); `name@project` picks one when a bare name is ambiguous.
+//! Agent names are unique per project (plus one project-less registration per name) and
+//! addressed as `name@project`. A bare name resolves when exactly one agent has it;
+//! otherwise resolution fails as ambiguous and the caller must use `name@project`.
 
 use std::path::{Component, Path};
 
@@ -317,7 +318,7 @@ pub(crate) fn resolve_agent(conn: &Connection, node_id: &str, who: &str) -> Resu
             address: address(name, slug.as_deref()),
         }),
         many => Err(Error::Ambiguous(format!(
-            "agent name {who:?} is registered in several projects; use one of: {}",
+            "agent name {who:?} is ambiguous: it is registered in several projects; use name@project, one of: {}",
             many.iter()
                 .map(|(_, n, s, _)| address(n, s.as_deref()))
                 .collect::<Vec<_>>()

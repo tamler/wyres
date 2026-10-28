@@ -32,6 +32,8 @@ Not in Milestone 1: resource registry, activity feed, federation, web UI/TUI, He
 
 ## Install
 
+Requires Rust 1.88 or newer (the workspace `rust-version`).
+
 ```bash
 cargo install --path crates/wyres
 ```
@@ -102,7 +104,7 @@ wyres events --limit 20
 
 ## Concepts
 
-- **Agents** have global names on a node. The same name may exist once per project; address it as `name@project` when a bare name is ambiguous.
+- **Agents** are unique per project and addressed as `name@project`. A bare `name` works when only one agent has it; otherwise you get an `ambiguous` error listing the `name@project` choices.
 - **Mail** is immutable messages in threads. Each recipient has its own read/ack state. Importance is `low | normal | high | urgent`.
 - **Requests** are opened from a message and can be claimed by any agent (advisory ownership). Past their due time they go `stale`, and anyone may take them over. Completing a request mails the requester in the same thread.
 - **Holds** are advisory leases on project-relative paths or globs (`src/**`, `Cargo.toml`). Exclusive holds conflict with any overlapping hold of another agent; shared holds only conflict with exclusive ones. `acquire` is all-or-nothing. TTL defaults to 30 minutes (clamped to 1 minute – 4 hours); `heartbeat` renews it.

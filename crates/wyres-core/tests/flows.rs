@@ -148,11 +148,68 @@ fn agent_names_disambiguate_with_project() {
     }
     let err = fx.store.agent("dave").unwrap_err();
     assert_eq!(err.code(), "ambiguous");
+    let text = err.to_string();
+    assert!(
+        text.contains("ambiguous") && text.contains("use name@project"),
+        "{text}"
+    );
+    assert!(
+        text.contains("dave@one") && text.contains("dave@two"),
+        "{text}"
+    );
+    // Ambiguous recipients fail the send instead of guessing.
+    let send = fx.store.send_message(SendMessage {
+        from: "alice".into(),
+        to: vec!["dave".into()],
+        subject: "which dave?".into(),
+        body: String::new(),
+        ..Default::default()
+    });
+    assert_eq!(send.unwrap_err().code(), "ambiguous");
     let one = fx.store.agent("dave@one").unwrap();
     assert_eq!(one.address, "dave@one");
     let msg = fx.send("alice", &["dave@two"], "hi two");
     assert_eq!(msg.to, vec!["dave@two"]);
     assert_eq!(fx.store.agent("nobody").unwrap_err().code(), "not_found");
+}
+
+#[test]
+fn bare_name_resolves_when_unique_across_projects() {
+    let fx = Fixture::new();
+    let register = |project: &str| {
+        fx.store
+            .register_agent(RegisterAgent {
+                name: "erin".into(),
+                program: Program::Codex,
+                project: Some(project.into()),
+                model: None,
+                description: None,
+            })
+            .unwrap()
+    };
+    let erin = register("/work/one");
+    assert_eq!(erin.address, "erin@one");
+    // Unique per project: registering again in the same project updates, not duplicates.
+    assert_eq!(register("/work/one").agent_id, erin.agent_id);
+
+    // The bare name and name@project both resolve to the one agent.
+    assert_eq!(fx.store.agent("erin").unwrap().agent_id, erin.agent_id);
+    assert_eq!(fx.store.agent("erin@one").unwrap().agent_id, erin.agent_id);
+    let msg = fx.send("alice", &["erin"], "hi erin");
+    assert_eq!(msg.to, vec!["erin@one"]);
+    assert_eq!(
+        fx.store
+            .inbox("erin", InboxQuery::default())
+            .unwrap()
+            .unread,
+        1
+    );
+    assert_eq!(fx.store.agent("erin@two").unwrap_err().code(), "not_found");
+
+    // A second project with the same name makes the bare name ambiguous.
+    register("/work/two");
+    assert_eq!(fx.store.agent("erin").unwrap_err().code(), "ambiguous");
+    assert_eq!(fx.store.agent("erin@two").unwrap().address, "erin@two");
 }
 
 #[test]

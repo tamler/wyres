@@ -84,7 +84,7 @@ Single SQLite database (WAL) per node. **v1 ships federation-ready columns** eve
 | **Resource** | `node_id`, kind, endpoint/bind, owner, purpose, `exclusive\|shared`, refcount, ttl, heartbeat, reachability, metadata |
 | **ActivityEvent** | projection of EventLog — mail\|request\|hold\|resource\|session\|system\|federation |
 
-**Agent naming (locked):** global agent names on a node; use `name@project` for disambiguation. Federation later: `agent@project@node`.
+**Agent naming (locked):** agent names are unique per project, addressed as `name@project`; a bare name resolves only when unambiguous. Federation later: `agent@project@node`.
 
 ## Resource registry (used / owned)
 

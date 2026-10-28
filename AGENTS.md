@@ -20,7 +20,7 @@ Milestone 1: **complete** (definition of done met; CI green). Keep the [README.m
 See [docs/DECISIONS.md](docs/DECISIONS.md):
 
 - License: **Apache-2.0**
-- Global agent names; disambiguate with `name@project` when needed
+- Agent names unique per project, addressed as `name@project` (bare `name` only when unambiguous)
 - DB: **`~/.wyres`** (or `$WYRES_HOME`)
 - Beads: deferred
 - Stack: **Rust + official `rmcp` + SQLite**
