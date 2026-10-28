@@ -1,5 +1,6 @@
 //! MCP surface: a small set of tools over the core store, served by `rmcp`.
 
+use crate::reap::{self, OrphanReport, ReapPlan};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{tool, tool_handler, tool_router, Json, ServerHandler};
@@ -7,8 +8,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use wyres_core::{
     AckOutcome, AcquireHolds, ActivityFeed, ActivityKind, ActivityQuery, ActivitySummary, Agent,
-    HeartbeatReport, Hold, HoldConflict, HoldFilter, Importance, Inbox, InboxQuery, Message,
-    NewRequest, Program, Project, RegisterAgent, Reply, Request, RequestAction, RequestUpdate,
+    HeartbeatReport, Hold, HoldConflict, HoldFilter, Importance, Inbox, InboxQuery, LeaseMode,
+    LeaseOutcome, Message, NewRequest, Program, Project, RegisterAgent, RegisterResource, Reply,
+    Request, RequestAction, RequestUpdate, Resource, ResourceFilter, ResourceKind, ResourceRef,
     SendMessage, SessionInfo, SessionPhase, Since, Store, Thread, ThreadSummary,
 };
 
@@ -191,6 +193,9 @@ pub struct HeartbeatArgs {
     /// Session is starting: records a session.started event.
     #[serde(default)]
     pub start: bool,
+    /// With end: keep resource leases (for servers meant to outlive the session).
+    #[serde(default)]
+    pub keep_resources: bool,
     /// Session is ending: release all holds and mark the agent offline.
     #[serde(default)]
     pub end: bool,
@@ -212,6 +217,101 @@ pub struct ActivityFeedArgs {
 pub struct ActivitySummarizeArgs {
     /// Window start: duration (30m, 2h, 1d), RFC 3339 time, or event id. Default 1h.
     pub since: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ResourceRegisterArgs {
+    pub agent: String,
+    pub kind: ResourceKind,
+    /// Identity on this machine, e.g. `ollama@11434`, `vite@5173`, `tcp:127.0.0.1:5432`, `metal:0`.
+    pub name: String,
+    /// How to reach it, e.g. `http://127.0.0.1:11434`.
+    pub endpoint: Option<String>,
+    /// Listening port (derived from name/endpoint when omitted).
+    pub port: Option<u16>,
+    /// Process id (enables orphan matching and human-approved reaping).
+    pub pid: Option<u32>,
+    /// Project absolute path or slug.
+    pub project: Option<String>,
+    pub purpose: Option<String>,
+    /// Exclusive resources cannot be borrowed by others (default: shared).
+    #[serde(default)]
+    pub exclusive: bool,
+    /// Lease length in seconds (default 1800, clamped to 60..86400); renew with resource_heartbeat.
+    pub ttl_seconds: Option<i64>,
+    /// Free-form object: model, backend (metal|mlx|cpu|cuda), estimated_bytes, cmdline, ...
+    pub metadata: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ResourceFindArgs {
+    pub kind: Option<ResourceKind>,
+    /// Case-insensitive substring of name, endpoint or purpose (e.g. `ollama`, `5173`).
+    pub query: Option<String>,
+    /// Project absolute path or slug.
+    pub project: Option<String>,
+    #[serde(default)]
+    pub include_released: bool,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ResourcesOut {
+    pub resources: Vec<Resource>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ResourceBorrowArgs {
+    pub agent: String,
+    /// Resource id, or `kind:name` such as `model_server:ollama@11434`.
+    pub resource: String,
+    pub ttl_seconds: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ResourceReleaseArgs {
+    pub agent: String,
+    /// Resource id, or `kind:name`.
+    pub resource: String,
+    /// Owner only: the resource has been shut down; end every lease and mark it released.
+    #[serde(default)]
+    pub stopped: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ResourceHeartbeatArgs {
+    pub agent: String,
+    /// Renew only these (ids or `kind:name`); default: all of the agent's leases.
+    #[serde(default)]
+    pub resources: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct OrphansListArgs {
+    /// Also scan for listening processes no registered resource accounts for (default true).
+    pub scan: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ResourceReapArgs {
+    pub agent: String,
+    /// Resource id, `kind:name`, or `pid:N` for an unregistered listener.
+    pub target: String,
+    /// Why it should be reaped (shown to the human).
+    pub reason: Option<String>,
+    /// Grace period to evaluate against (default 600 seconds).
+    pub grace_seconds: Option<i64>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ReapRequestOut {
+    pub plan: ReapPlan,
+    /// Always false: agents cannot reap. A human runs the command below.
+    pub executed: bool,
+    pub human_command: String,
+}
+
+fn resource_ref(raw: &str) -> wyres_core::Result<ResourceRef> {
+    ResourceRef::parse(raw)
 }
 
 #[tool_router(router = tool_router)]
@@ -422,7 +522,147 @@ impl WyresMcp {
             } else {
                 SessionPhase::Beat
             };
-            s.session(&a.agent, phase, SessionInfo::default())
+            s.session(
+                &a.agent,
+                phase,
+                SessionInfo {
+                    keep_resources: a.keep_resources,
+                    ..Default::default()
+                },
+            )
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Register a running resource (model server, dev server, port, GPU, \
+        container, long job) and take its owner lease. Call resource_find first: if it is \
+        already registered, borrow it instead of starting a duplicate."
+    )]
+    async fn resource_register(
+        &self,
+        Parameters(a): Parameters<ResourceRegisterArgs>,
+    ) -> ToolResult<LeaseOutcome> {
+        self.run(move |s| {
+            s.register_resource(RegisterResource {
+                agent: a.agent,
+                kind: a.kind,
+                name: a.name,
+                endpoint: a.endpoint,
+                port: a.port,
+                pid: a.pid,
+                project: a.project,
+                purpose: a.purpose,
+                mode: if a.exclusive {
+                    LeaseMode::Exclusive
+                } else {
+                    LeaseMode::Shared
+                },
+                ttl_seconds: a.ttl_seconds,
+                metadata: a.metadata,
+            })
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Find registered resources before starting a server or job. Returns \
+        live and lapsed resources with owner, leases (refcount), endpoint and status."
+    )]
+    async fn resource_find(
+        &self,
+        Parameters(a): Parameters<ResourceFindArgs>,
+    ) -> ToolResult<ResourcesOut> {
+        self.run(move |s| {
+            Ok(ResourcesOut {
+                resources: s.find_resources(ResourceFilter {
+                    kind: a.kind,
+                    query: a.query,
+                    project: a.project,
+                    include_released: a.include_released,
+                })?,
+            })
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Borrow a shared resource (reference-counted lease with TTL). \
+        Exclusive resources refuse; borrowing a lapsed resource adopts it; borrowing again renews."
+    )]
+    async fn resource_borrow(
+        &self,
+        Parameters(a): Parameters<ResourceBorrowArgs>,
+    ) -> ToolResult<LeaseOutcome> {
+        self.run(move |s| s.borrow_resource(&a.agent, &resource_ref(&a.resource)?, a.ttl_seconds))
+            .await
+    }
+
+    #[tool(
+        description = "Release your lease on a resource (ownership passes to the oldest \
+        borrower). Owners pass stopped=true after shutting it down."
+    )]
+    async fn resource_release(
+        &self,
+        Parameters(a): Parameters<ResourceReleaseArgs>,
+    ) -> ToolResult<LeaseOutcome> {
+        self.run(move |s| s.release_resource(&a.agent, &resource_ref(&a.resource)?, a.stopped))
+            .await
+    }
+
+    #[tool(description = "Renew your resource leases (all, or the listed ones).")]
+    async fn resource_heartbeat(
+        &self,
+        Parameters(a): Parameters<ResourceHeartbeatArgs>,
+    ) -> ToolResult<ResourcesOut> {
+        self.run(move |s| {
+            let targets = a
+                .resources
+                .iter()
+                .map(|r| resource_ref(r))
+                .collect::<wyres_core::Result<Vec<_>>>()?;
+            Ok(ResourcesOut {
+                resources: s.heartbeat_resources(&a.agent, &targets)?,
+            })
+        })
+        .await
+    }
+
+    #[tool(
+        description = "List orphan candidates: registered resources whose leases lapsed, and \
+        (by default) listening processes that no registered resource accounts for."
+    )]
+    async fn orphans_list(
+        &self,
+        Parameters(a): Parameters<OrphansListArgs>,
+    ) -> ToolResult<OrphanReport> {
+        self.run(move |s| reap::orphans(s, a.scan.unwrap_or(true)))
+            .await
+    }
+
+    #[tool(
+        description = "Request a reap. This never terminates anything: it returns the reap \
+        plan and safety checks, records the request in the activity feed, and gives the command \
+        a human must run to confirm."
+    )]
+    async fn resource_reap(
+        &self,
+        Parameters(a): Parameters<ResourceReapArgs>,
+    ) -> ToolResult<ReapRequestOut> {
+        self.run(move |s| {
+            let grace = a.grace_seconds.unwrap_or(reap::DEFAULT_GRACE_SECONDS);
+            let plan = reap::plan(s, &a.target, grace)
+                .map_err(|e| wyres_core::Error::Invalid(format!("{e:#}")))?;
+            s.note_reap_request(
+                &a.agent,
+                &a.target,
+                a.reason.as_deref().unwrap_or("orphaned"),
+            )?;
+            Ok(ReapRequestOut {
+                human_command: format!("wyres reap {} --grace {grace} --confirm", a.target),
+                plan,
+                executed: false,
+            })
         })
         .await
     }

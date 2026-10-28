@@ -318,6 +318,87 @@ fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
                 json!({ "hold_id": s("hold_id") }),
             )
         }
+        "resource.registered" => (
+            format!(
+                "{actor} registered {} {} ({}){}",
+                s("kind"),
+                s("name"),
+                s("mode"),
+                p.get("purpose")
+                    .and_then(Value::as_str)
+                    .map(|x| format!(" for {x}"))
+                    .unwrap_or_default()
+            ),
+            json!({ "resource_id": s("resource_id") }),
+        ),
+        "resource.adopted" | "resource.borrowed" | "resource.stopped" => {
+            let rid = s("resource_id");
+            let verb = match row.kind.as_str() {
+                "resource.adopted" => "adopted",
+                "resource.borrowed" => "borrowed",
+                _ => "marked stopped",
+            };
+            (
+                format!("{actor} {verb} {}", resource_label(conn, &rid)?),
+                json!({ "resource_id": rid }),
+            )
+        }
+        "resource.released" | "resource.renewed" => {
+            let n = p
+                .get("lease_ids")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
+            let verb = if row.kind == "resource.renewed" {
+                "renewed"
+            } else {
+                "released"
+            };
+            let text = match p.get("resource_id").and_then(Value::as_str) {
+                Some(rid) => format!("{actor} {verb} {}", resource_label(conn, rid)?),
+                None if s("reason") == "session_end" => {
+                    format!("{actor} released {n} resource lease(s) at session end")
+                }
+                None => format!("{actor} {verb} {n} resource lease(s)"),
+            };
+            (
+                text,
+                json!({ "resource_id": p.get("resource_id"), "lease_ids": p.get("lease_ids") }),
+            )
+        }
+        "resource.transferred" => {
+            let rid = s("resource_id");
+            (
+                format!(
+                    "{} now owned by {}",
+                    resource_label(conn, &rid)?,
+                    agent_address(conn, &s("owner_id"))?
+                ),
+                json!({ "resource_id": rid }),
+            )
+        }
+        "resource.lease_expired" => {
+            let rid = s("resource_id");
+            (
+                format!(
+                    "lease on {} by {} expired",
+                    resource_label(conn, &rid)?,
+                    agent_address(conn, &s("agent_id"))?
+                ),
+                json!({ "resource_id": rid, "lease_id": s("lease_id") }),
+            )
+        }
+        "resource.reap_requested" => (
+            format!(
+                "{actor} asked a human to reap {}: {}",
+                s("target"),
+                s("reason")
+            ),
+            json!({ "target": s("target") }),
+        ),
+        "resource.reaped" => (
+            format!("{actor} reaped {}", s("detail")),
+            json!({ "resource_id": p.get("resource_id"), "pid": p.get("pid") }),
+        ),
         other => (format!("{actor}: {other}"), p.clone()),
     };
     Ok(ActivityItem {
@@ -330,6 +411,23 @@ fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
         summary,
         refs,
     })
+}
+
+fn resource_label(conn: &Connection, id: &str) -> Result<String> {
+    Ok(conn
+        .query_row(
+            "SELECT kind, name FROM resources WHERE resource_id = ?1",
+            [id],
+            |r| {
+                Ok(format!(
+                    "{} {}",
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?
+                ))
+            },
+        )
+        .optional()?
+        .unwrap_or_else(|| id.to_string()))
 }
 
 fn message_subject(conn: &Connection, id: &str) -> Result<String> {
@@ -501,7 +599,7 @@ impl Store {
                 .filter(|r| {
                     !matches!(
                         r.kind.as_str(),
-                        "delivery.read" | "delivery.acked" | "hold.renewed"
+                        "delivery.read" | "delivery.acked" | "hold.renewed" | "resource.renewed"
                     )
                 })
                 .collect();

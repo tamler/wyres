@@ -11,6 +11,7 @@ mod holds;
 mod identity;
 mod mail;
 mod requests;
+mod resources;
 mod store;
 mod time;
 
@@ -30,5 +31,10 @@ pub use mail::{
     Thread, ThreadSummary,
 };
 pub use requests::{Request, RequestAction, RequestFilter, RequestStatus, RequestUpdate};
+pub use resources::{
+    derive_port, Lease, LeaseMode, LeaseOutcome, RegisterResource, Resource, ResourceFilter,
+    ResourceKind, ResourceRef, DEFAULT_LEASE_TTL_SECONDS, MAX_LEASE_TTL_SECONDS,
+    MIN_LEASE_TTL_SECONDS,
+};
 pub use store::{default_home, Clock, Event, NodeInfo, Store, DB_FILE};
 pub use time::fmt_ts;

@@ -2,15 +2,15 @@
 
 Free and open source, always: a local-first, vendor-neutral inbox (and later, resource registry) for coding agents. Claude Code, Grok, Codex, and others are treated equally via plain MCP + a shared CLI. Sibling agent-tools project under the [WyreUp](https://wyreup.com/) brand.
 
-**License:** [Apache-2.0](LICENSE) · **Status:** Milestone 2 complete (mail checking + activity feed)
+**License:** [Apache-2.0](LICENSE) · **Status:** Milestone 3 complete (resource registry)
 
 ## Status
 
 | Milestone | Scope | Status |
 |---|---|---|
 | 1 | Local core: SQLite event log, agents, mail, requests, path holds, MCP (stdio + loopback HTTP), CLI | ✅ tamler/wyres#1 |
-| 2 | Mail checking: activity feed + summary, session events, hook packs (Claude Code, Codex, Grok CLI, Cursor best effort), `wyres hook install` | ✅ complete |
-| 3 | Resource registry: leases, orphan scanner, human-approved reap | planned |
+| 2 | Mail checking: activity feed + summary, session events, hook packs (Claude Code, Codex, Grok CLI, Cursor best effort), `wyres hook install` | ✅ tamler/wyres#2 |
+| 3 | Resource registry: shared/exclusive leases, orphan scanner, human-approved reap | ✅ complete |
 | 4 | Authenticated remote peer (Grok Bot): tokens, audit log, `GET /activity` | planned |
 | 5 | Federation (v2): pairing, hub-and-spoke sync, cross-node mail | planned |
 | 6 | Polish: wake adapters, Herdr plugin, release builds | planned |
@@ -26,6 +26,7 @@ Current milestone brief: [AGENTS.md](AGENTS.md). Every milestone merges only wit
 | [docs/SPEC.md](docs/SPEC.md) | Full research + product spec |
 | [docs/DECISIONS.md](docs/DECISIONS.md) | Locked defaults and milestone design decisions |
 | [docs/HOOKS.md](docs/HOOKS.md) | Hook pack install guide (Claude Code, Codex, Grok CLI, Cursor) |
+| [docs/RESOURCES.md](docs/RESOURCES.md) | Resource registry, orphans and human-approved reaping |
 
 ## Install
 
@@ -48,6 +49,10 @@ wyres hook install --client all
 ```
 
 Installs session-start / prompt / session-end hooks for Claude Code, Codex, Grok CLI and Cursor (best effort), so each session starts with a short inbox + activity digest and each prompt mentions new mail once. Idempotent, backed up, and never clobbers existing hooks; see [docs/HOOKS.md](docs/HOOKS.md).
+
+## Share running servers (resources)
+
+Agents call `resource_find` before starting a model server, dev server or job, and borrow what is already running. Orphans are listed by `wyres orphans`; only a human can reap them (`wyres reap … --confirm`). See [docs/RESOURCES.md](docs/RESOURCES.md) and the AGENTS.md snippet in [AGENTS.md](AGENTS.md#snippet-for-your-projects-agentsmd).
 
 ## Connect an agent (MCP)
 
@@ -80,6 +85,12 @@ wyres serve
 | `heartbeat` | Mark alive, renew holds, get counts; `start: true` / `end: true` record session start / end (end releases holds) |
 | `activity_feed` | Who is doing what: mail, requests, holds, sessions — summaries and ids, never bodies; `since` cursor |
 | `activity_summarize` | Counts, active agents, request/hold totals and highlights for a window (default 1h) |
+| `resource_find` | Find running model/dev servers, ports, GPUs, containers, jobs before starting one |
+| `resource_register` | Register a running resource and take the owner lease |
+| `resource_borrow` / `resource_release` | Shared-use leases (refcounted); release passes ownership on, `stopped` ends it |
+| `resource_heartbeat` | Renew resource leases |
+| `orphans_list` | Lapsed resources + unregistered listening processes |
+| `resource_reap` | Plan + request only — a human runs `wyres reap --confirm` |
 
 Tool errors are returned as `{"error": {"code", "message"}}` with codes `not_found`, `invalid`, `conflict`, `ambiguous`, `forbidden`.
 
@@ -106,6 +117,13 @@ wyres heartbeat --agent alice --end
 wyres activity --since 1h --kinds mail,request
 wyres activity --summary
 wyres hook install --client codex --dry-run
+wyres resources -q ollama
+wyres resource register model_server ollama@11434 --agent alice --endpoint http://127.0.0.1:11434 --pid 4242
+wyres borrow model_server:ollama@11434 --agent bob
+wyres release model_server:ollama@11434 --agent bob
+wyres orphans
+wyres reap <resource-id|kind:name|pid:N>            # plan only
+wyres reap <resource-id|kind:name|pid:N> --confirm  # human confirmation
 wyres status
 wyres events --limit 20
 ```

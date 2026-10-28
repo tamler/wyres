@@ -8,9 +8,10 @@ use std::time::Duration;
 use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
 use wyres_core::{
-    AcquireHolds, ActivityKind, ActivityQuery, HoldFilter, Importance, InboxQuery, NewRequest,
-    Program, RegisterAgent, Reply, RequestAction, RequestFilter, RequestStatus, RequestUpdate,
-    SendMessage, SessionInfo, SessionPhase, Since, Store,
+    AcquireHolds, ActivityKind, ActivityQuery, HoldFilter, Importance, InboxQuery, LeaseMode,
+    NewRequest, Program, RegisterAgent, RegisterResource, Reply, RequestAction, RequestFilter,
+    RequestStatus, RequestUpdate, ResourceFilter, ResourceKind, ResourceRef, SendMessage,
+    SessionInfo, SessionPhase, Since, Store,
 };
 
 use crate::hooks::{self, Client, HookEnv, HookEvent};
@@ -186,6 +187,64 @@ pub enum Command {
         start: bool,
         #[arg(long)]
         end: bool,
+        /// With --end: keep resource leases (servers meant to outlive the session).
+        #[arg(long, requires = "end")]
+        keep: bool,
+    },
+    /// Find registered resources (model servers, dev servers, ports, GPUs, containers, jobs).
+    Resources {
+        /// model_server | dev_server | port | gpu | container | long_job
+        #[arg(long)]
+        kind: Option<String>,
+        /// Substring of name, endpoint or purpose.
+        #[arg(long, short = 'q')]
+        query: Option<String>,
+        /// Project path or slug.
+        #[arg(long, short = 'p')]
+        project: Option<String>,
+        /// Include released resources.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Register a resource or renew resource leases.
+    #[command(subcommand)]
+    Resource(ResourceCmd),
+    /// Borrow a shared resource (id or kind:name).
+    Borrow {
+        target: String,
+        #[command(flatten)]
+        agent: AgentArg,
+        /// Lease seconds (default 1800).
+        #[arg(long)]
+        ttl: Option<i64>,
+    },
+    /// Release your lease on a resource (id or kind:name).
+    Release {
+        target: String,
+        #[command(flatten)]
+        agent: AgentArg,
+        /// Owner: the resource was shut down; end all leases and mark it released.
+        #[arg(long)]
+        stopped: bool,
+    },
+    /// List orphan candidates: lapsed resources and unregistered listeners.
+    Orphans {
+        /// Skip the listening-process scan (lapsed registered resources only).
+        #[arg(long)]
+        no_scan: bool,
+    },
+    /// Reap an orphan (resource id, kind:name, or pid:N). Without --confirm, only shows the plan.
+    Reap {
+        target: String,
+        /// Seconds the target must have been orphaned (or alive, for pid targets).
+        #[arg(long, default_value_t = crate::reap::DEFAULT_GRACE_SECONDS)]
+        grace: i64,
+        /// Human confirmation: actually send SIGTERM. Agents never pass this.
+        #[arg(long)]
+        confirm: bool,
+        /// With --confirm: SIGKILL if the process survives SIGTERM.
+        #[arg(long, requires = "confirm")]
+        force: bool,
     },
     /// Show the activity feed (who is doing what), or a summary of it.
     Activity {
@@ -210,6 +269,45 @@ pub enum Command {
     Events {
         #[arg(long, default_value_t = 20)]
         limit: u32,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ResourceCmd {
+    /// Register a running resource and take the owner lease.
+    Register {
+        /// model_server | dev_server | port | gpu | container | long_job
+        kind: String,
+        /// Identity, e.g. ollama@11434, vite@5173, tcp:127.0.0.1:5432, metal:0.
+        name: String,
+        #[command(flatten)]
+        agent: AgentArg,
+        #[arg(long)]
+        endpoint: Option<String>,
+        #[arg(long)]
+        port: Option<u16>,
+        #[arg(long)]
+        pid: Option<u32>,
+        /// Project path or slug.
+        #[arg(long, short = 'p')]
+        project: Option<String>,
+        #[arg(long)]
+        purpose: Option<String>,
+        /// Refuse borrowers.
+        #[arg(long)]
+        exclusive: bool,
+        /// Lease seconds (default 1800, max 86400).
+        #[arg(long)]
+        ttl: Option<i64>,
+        /// Metadata as key=value (repeatable), e.g. --meta model=llama3 --meta backend=metal.
+        #[arg(long = "meta", value_name = "KEY=VALUE")]
+        meta: Vec<String>,
+    },
+    /// Renew your resource leases (all, or the given ids / kind:name).
+    Heartbeat {
+        #[command(flatten)]
+        agent: AgentArg,
+        targets: Vec<String>,
     },
 }
 
@@ -705,14 +803,121 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             let holds = store.holds(HoldFilter { project, agent })?;
             emit(json, &holds, |h| output::holds(h))
         }
-        Command::Heartbeat { agent, start, end } => {
+        Command::Heartbeat {
+            agent,
+            start,
+            end,
+            keep,
+        } => {
             let phase = match (start, end) {
                 (true, _) => SessionPhase::Start,
                 (_, true) => SessionPhase::End,
                 _ => SessionPhase::Beat,
             };
-            let hb = store.session(&agent.agent, phase, SessionInfo::default())?;
+            let hb = store.session(
+                &agent.agent,
+                phase,
+                SessionInfo {
+                    keep_resources: keep,
+                    ..Default::default()
+                },
+            )?;
             emit(json, &hb, output::heartbeat)
+        }
+        Command::Resources {
+            kind,
+            query,
+            project,
+            all,
+        } => {
+            let rs = store.find_resources(ResourceFilter {
+                kind: kind.map(|k| k.parse::<ResourceKind>()).transpose()?,
+                query,
+                project,
+                include_released: all,
+            })?;
+            emit(json, &rs, |r| output::resources(r))
+        }
+        Command::Resource(ResourceCmd::Register {
+            kind,
+            name,
+            agent,
+            endpoint,
+            port,
+            pid,
+            project,
+            purpose,
+            exclusive,
+            ttl,
+            meta,
+        }) => {
+            let mut metadata = serde_json::Map::new();
+            for kv in meta {
+                let (k, v) = kv
+                    .split_once('=')
+                    .ok_or_else(|| anyhow::anyhow!("--meta expects KEY=VALUE, got {kv:?}"))?;
+                metadata.insert(k.to_string(), serde_json::Value::String(v.to_string()));
+            }
+            let project = project
+                .map(|p| project_key(&store, &agent.agent, Some(p)))
+                .transpose()?;
+            let out = store.register_resource(RegisterResource {
+                agent: agent.agent,
+                kind: kind.parse()?,
+                name,
+                endpoint,
+                port,
+                pid,
+                project,
+                purpose,
+                mode: if exclusive {
+                    LeaseMode::Exclusive
+                } else {
+                    LeaseMode::Shared
+                },
+                ttl_seconds: ttl,
+                metadata: Some(serde_json::Value::Object(metadata)),
+            })?;
+            emit(json, &out, output::lease_outcome)
+        }
+        Command::Resource(ResourceCmd::Heartbeat { agent, targets }) => {
+            let targets = targets
+                .iter()
+                .map(|t| ResourceRef::parse(t))
+                .collect::<Result<Vec<_>, _>>()?;
+            let rs = store.heartbeat_resources(&agent.agent, &targets)?;
+            emit(json, &rs, |r| output::resources(r))
+        }
+        Command::Borrow { target, agent, ttl } => {
+            let out = store.borrow_resource(&agent.agent, &ResourceRef::parse(&target)?, ttl)?;
+            emit(json, &out, output::lease_outcome)
+        }
+        Command::Release {
+            target,
+            agent,
+            stopped,
+        } => {
+            let out =
+                store.release_resource(&agent.agent, &ResourceRef::parse(&target)?, stopped)?;
+            emit(json, &out, output::lease_outcome)
+        }
+        Command::Orphans { no_scan } => {
+            let report = crate::reap::orphans(&store, !no_scan)?;
+            emit(json, &report, output::orphans)
+        }
+        Command::Reap {
+            target,
+            grace,
+            confirm,
+            force,
+        } => {
+            let plan = crate::reap::plan(&store, &target, grace)?;
+            if confirm {
+                let done = crate::reap::execute(&store, plan, force)?;
+                emit(json, &done, output::reap_plan)
+            } else {
+                emit(json, &plan, output::reap_plan)
+            }
         }
         Command::Activity {
             since,

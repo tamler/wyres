@@ -4,4 +4,6 @@ pub mod cli;
 pub mod hooks;
 pub mod mcp;
 mod output;
+pub mod reap;
+pub mod scan;
 pub mod serve;

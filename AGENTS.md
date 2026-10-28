@@ -1,65 +1,66 @@
-# AGENTS.md — build brief (Milestone 2: mail checking + activity feed)
+# AGENTS.md — build brief (Milestone 3: resource registry)
 
-**Read this before writing code.** Product vision lives in [docs/SPEC.md](docs/SPEC.md); locked defaults in [docs/DECISIONS.md](docs/DECISIONS.md). This file is the scope for the current coding milestone.
+**Read this before writing code.** Product vision lives in [docs/SPEC.md](docs/SPEC.md); locked defaults and milestone decisions in [docs/DECISIONS.md](docs/DECISIONS.md). This file is the scope for the current coding milestone.
 
 ## Status
 
-Milestone 2: **complete** (definition of done met). Milestone 1 (local core) shipped in tamler/wyres#1. Keep the [README.md](README.md) status current in every PR.
+Milestone 3: **complete** (definition of done met). Earlier: M1 local core (tamler/wyres#1), M2 mail checking + activity feed (tamler/wyres#2). Keep the [README.md](README.md) status current in every PR.
 
 ## Clean-room rules (mandatory)
 
-- Implement from **this repository's docs** only (`docs/SPEC.md`, `docs/DECISIONS.md`, this file).
-- **Do not** copy code, schemas, SQL, proprietary phrasing, or distinctive APIs from `mcp_agent_mail`, `mcp_agent_mail_rust`, forks, or any project with a non-permissive license rider.
-- Public docs for MCP, `rmcp`, SQLite, Rust crates, and each client's hook documentation are fine.
+- Implement from **this repository's docs** only.
+- **Do not** copy code, schemas, SQL, phrasing, or distinctive APIs from `mcp_agent_mail*`, forks, or any project with a non-permissive license rider.
+- Public docs for MCP, `rmcp`, SQLite, Rust crates, `lsof`, `ss` and `ps` are fine.
 
 ## Locked defaults
 
-See [docs/DECISIONS.md](docs/DECISIONS.md): Apache-2.0; agent names unique per project (`name@project`); DB at `~/.wyres` (or `$WYRES_HOME`); Rust + `rmcp` + SQLite; hooks-first wake; free and open source always; loopback-only binds; MSRV Rust 1.88.
+Apache-2.0; agent names unique per project; DB at `~/.wyres`; Rust + `rmcp` + SQLite; hooks-first; free and open source always; loopback-only binds; MSRV 1.88. **Never reap without human approval.**
 
-## Milestone 2 — in scope
+## Milestone 3 — in scope
 
-The v1 delivery guarantee: agents learn about mail because a lifecycle hook injects a tiny digest, not because they poll.
+"Find before start": before starting a model server, dev server or GPU job, an agent asks Wyres whether one is already running and **borrows** it instead of spawning a duplicate.
 
-1. **Activity feed** — a readable projection of the event log, by category `mail | request | hold | resource | session | system | federation`.
-   - MCP `activity_feed(since?, limit?, kinds?)` (oldest first, `next_since` cursor; `since` = duration, RFC 3339 time, or event id).
-   - MCP `activity_summarize(since?)` (counts, active agents, request/hold totals, highlights, text digest).
-   - CLI `wyres activity [--since] [--limit] [--kinds] [--summary] [--json]`.
-   - Items carry one-line summaries and ids only — **never message bodies**.
-2. **Session events** — `session.started` / `session.ended` recorded in the event log (`heartbeat` with `start` / `end`; hooks call them).
-3. **Hook packs** (POSIX `sh`) for Claude Code, Codex, Grok CLI, and Cursor (best effort), all calling one wrapper that runs `wyres hook run <event> --client <c>`:
-   - session start → register agent if needed, `session.started`, capped inbox + activity digest;
-   - each prompt → heartbeat (renew holds) and a one-line notice only for mail not yet announced;
-   - session end → `session.ended`, release holds.
-4. **`wyres hook install|uninstall --client <claude|codex|grok|cursor|all> [--dry-run]`** and `wyres hook status`:
-   - idempotent; backs up any file it changes; never clobbers existing hooks or unrelated settings;
-   - refuses to edit invalid JSON or files it does not own; all-or-nothing across clients.
-5. **Docs** — [docs/HOOKS.md](docs/HOOKS.md) install guide per client (including trust steps).
-6. **Tests** — feed/summary/session events in core; install/uninstall/run against a temporary `HOME`; MCP tools.
+1. **Registry** — kinds `model_server | dev_server | port | gpu | container | long_job`; identity `kind:name` (e.g. `model_server:ollama@11434`), endpoint, port, pid, project, purpose, metadata (backend, estimated bytes for Apple Silicon unified memory, ...).
+2. **Leases** — owner + borrowers, `shared` (refcounted) or `exclusive`, TTL (default 30 min, 1 min–24 h) + heartbeat; sweeper expiry; owner release passes ownership to the oldest borrower; `--stopped` ends it.
+3. **Orphans** — resources with no live lease stay listed as orphan candidates (re-adoptable); a macOS-first scanner (`lsof`, `ss` fallback, `ps` for age/command) finds listening processes no registered resource accounts for; system daemons are allowlisted out.
+4. **Reap** — needs a grace period (default 10 min) **and** an explicit human `--confirm` on the CLI. MCP `resource_reap` only returns the plan and records a request. Only the current user's non-system processes; SIGTERM, SIGKILL only with `--force`.
+5. **Session end** — releases holds and resource leases (`heartbeat --end --keep` keeps resource leases).
+6. **Surfaces** — MCP `resource_register`, `resource_find`, `resource_borrow`, `resource_release`, `resource_heartbeat`, `orphans_list`, `resource_reap`; CLI `wyres resources | resource register|heartbeat | borrow | release | orphans | reap`.
+7. **Docs** — [docs/RESOURCES.md](docs/RESOURCES.md) and the AGENTS.md snippet below.
 
-### Definition of done (Milestone 2)
+### Definition of done (Milestone 3)
 
-- [x] `activity_feed` + `activity_summarize` MCP tools and `wyres activity` (with `--summary`)
-- [x] `session.started` / `session.ended` events; feed never exposes message bodies
-- [x] Hook packs for Claude Code, Codex, Grok CLI, Cursor (best effort) with a capped digest (≤ 1500 chars)
-- [x] `wyres hook install|uninstall|status` — idempotent, backed up, non-clobbering, `--dry-run`
-- [x] docs/HOOKS.md install guide
-- [x] Tests run against a temp HOME
+- [x] Registry with shared/exclusive leases, refcounts, TTL + heartbeat, transfer, adoption
+- [x] Orphan list: lapsed leases + unregistered listeners (lsof / ss / ps), system allowlist
+- [x] Reap gated by grace period + explicit human `--confirm`; MCP never terminates anything
+- [x] Holds and resource leases released on session end (`--keep` for resources)
+- [x] MCP tools + CLI commands; activity feed summaries for resource events
+- [x] Tests: core lease lifecycle; CLI; reap of a real process; MCP reap never signals; listener scan
 - [x] CI green: test + clippy (`-D warnings`) + fmt + MSRV 1.88
 - [x] README status updated
 
 ## Explicitly OUT of scope (later milestones)
 
-- Resource registry, orphan scanner, reap (Milestone 3)
-- Authenticated remote peers, tokens, `GET /activity` over HTTP (Milestone 4)
-- Federation / pairing / sync (Milestone 5)
-- Herdr plugin, tmux/cmux wake adapters, release builds (Milestone 6)
+- Authenticated remote peers, tokens, audit log, `GET /activity` (Milestone 4)
+- Federation, remote resource visibility/borrow (Milestone 5)
+- Auto-reap policies (never by default), GPU pressure sampling (`powermetrics`), wake adapters, release builds (Milestone 6 / later)
 
-## Implementation notes
+## Snippet for your project's AGENTS.md
 
-- Hooks must **fail open**: `wyres hook run` always exits 0 and prints nothing on error; the wrapper exits 0 even if `wyres` is missing.
-- Default hook identity is `<client>@<project>` (project = nearest git root of the client's cwd), registered on first use; `$WYRES_AGENT` overrides it. No client gets special treatment.
-- Injected text is factual and short; keep it under the cap and include ids so agents can act through MCP or the CLI.
-- Clients differ: see the decisions recorded in docs/DECISIONS.md (Grok de-duplication, Cursor prompt hooks).
+Paste this into the AGENTS.md (or CLAUDE.md) of any repository where agents start servers:
+
+```markdown
+## Shared resources (Wyres)
+
+- Before starting a model server, dev server, database, container or long job, call
+  `resource_find` (or run `wyres resources -q <name-or-port>`). If it is already running,
+  `resource_borrow` it instead of starting a duplicate.
+- If you start one, `resource_register` it right away with its port, pid and purpose, and keep
+  it alive with `heartbeat` / `resource_heartbeat`. Release it (`resource_release`) when done;
+  pass `stopped: true` if you shut it down.
+- Never kill processes you did not start. To get rid of an orphan, use `resource_reap`, which
+  asks a human; only a human runs `wyres reap --confirm`.
+```
 
 ## Keep the README status current
 

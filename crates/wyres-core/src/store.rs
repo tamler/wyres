@@ -255,7 +255,8 @@ pub fn new_id() -> String {
     ulid::Ulid::new().to_string()
 }
 
-const MIGRATIONS: &[&str] = &[r#"
+const MIGRATIONS: &[&str] = &[
+    r#"
 CREATE TABLE nodes (
     node_id      TEXT PRIMARY KEY,
     display_name TEXT NOT NULL,
@@ -364,7 +365,46 @@ CREATE TABLE holds (
     release_reason TEXT
 );
 CREATE INDEX holds_live ON holds(project_id, released_at, expires_at);
-"#];
+"#,
+    r#"
+CREATE TABLE resources (
+    resource_id    TEXT PRIMARY KEY,
+    node_id        TEXT NOT NULL REFERENCES nodes(node_id),
+    kind           TEXT NOT NULL,
+    name           TEXT NOT NULL,
+    endpoint       TEXT,
+    port           INTEGER,
+    pid            INTEGER,
+    project_id     TEXT REFERENCES projects(project_id),
+    purpose        TEXT,
+    mode           TEXT NOT NULL,
+    metadata       TEXT NOT NULL DEFAULT '{}',
+    created_at     INTEGER NOT NULL,
+    lapsed_at      INTEGER,
+    released_at    INTEGER,
+    release_reason TEXT,
+    event_id       TEXT NOT NULL
+);
+CREATE UNIQUE INDEX resources_live_identity ON resources(node_id, kind, name)
+    WHERE released_at IS NULL;
+
+CREATE TABLE resource_leases (
+    lease_id       TEXT PRIMARY KEY,
+    resource_id    TEXT NOT NULL REFERENCES resources(resource_id),
+    node_id        TEXT NOT NULL REFERENCES nodes(node_id),
+    agent_id       TEXT NOT NULL REFERENCES agents(agent_id),
+    role           TEXT NOT NULL,
+    ttl_seconds    INTEGER NOT NULL,
+    created_at     INTEGER NOT NULL,
+    renewed_at     INTEGER NOT NULL,
+    expires_at     INTEGER NOT NULL,
+    released_at    INTEGER,
+    release_reason TEXT
+);
+CREATE INDEX resource_leases_by_resource ON resource_leases(resource_id, released_at);
+CREATE INDEX resource_leases_by_agent ON resource_leases(agent_id, released_at);
+"#,
+];
 
 fn migrate(conn: &mut Connection) -> Result<()> {
     let current: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;

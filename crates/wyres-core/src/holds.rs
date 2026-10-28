@@ -55,6 +55,7 @@ pub struct HoldReport {
 pub struct SweepReport {
     pub expired_holds: usize,
     pub stale_requests: usize,
+    pub expired_leases: usize,
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -64,6 +65,8 @@ pub struct HeartbeatReport {
     pub last_seen_at: String,
     pub renewed_holds: Vec<Hold>,
     pub released_holds: Vec<String>,
+    /// Resource leases renewed (or released, at session end).
+    pub resource_leases: u32,
     pub unread: u32,
     pub urgent_unread: u32,
     /// Requests addressed to or owned by the agent that still need attention.
@@ -86,6 +89,8 @@ pub struct SessionInfo {
     pub client: Option<String>,
     /// The client's own session identifier, if it has one.
     pub session_id: Option<String>,
+    /// At session end, keep resource leases (e.g. a server meant to outlive the session).
+    pub keep_resources: bool,
 }
 
 /// Input for [`Store::acquire_holds`].
@@ -308,9 +313,11 @@ pub(crate) fn sweep_tx(tx: &Tx<'_>) -> Result<SweepReport> {
         )?;
     }
     let stale_requests = stale_overdue_tx(tx)?;
+    let expired_leases = crate::resources::expire_leases_tx(tx)?;
     Ok(SweepReport {
         expired_holds: expired.len(),
         stale_requests,
+        expired_leases,
     })
 }
 
@@ -582,6 +589,8 @@ impl Store {
                     "session_id": info.session_id,
                 })
             };
+            let release_leases = phase == SessionPhase::End && !info.keep_resources;
+            let resource_leases = crate::resources::session_leases_tx(tx, &me, release_leases)?;
             let (renewed, released, status) = if phase == SessionPhase::End {
                 let ids: Vec<String> = owned.into_iter().map(|(id, _)| id).collect();
                 release_tx(tx, &me.address, &ids, "session_end")?;
@@ -614,6 +623,7 @@ impl Store {
                 last_seen_at: fmt_ts(tx.now),
                 renewed_holds: renewed,
                 released_holds: released,
+                resource_leases,
                 unread,
                 urgent_unread,
                 open_requests,
