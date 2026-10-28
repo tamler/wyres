@@ -11,7 +11,7 @@ Locked defaults for v1 (2026-10-28). See [SPEC.md](SPEC.md) for the full researc
 | Stack | **Rust + official `rmcp` + SQLite** | Single static binary; hooks stay tiny shell scripts. |
 | Wake strategy | **Hooks-first** | Claude Code, Grok, Codex (Cursor best-effort). Herdr / cmux / tmux are optional adapters, not required for core. |
 | Business model | **Free and open source, always** | Every feature (including federation) ships in the open repo. No paid tier, no paid hosted relay, no open-core upsell. Self-hostable hub; community-run relays optional. |
-| Binding (milestone 1) | **Local-only** | Loopback / stdio by default. No public bind in M1. |
+| Binding | **Loopback by default** | Loopback / stdio by default. From M4, a non-loopback bind needs both `--auth` and `--allow-remote-bind`; tunnels to a loopback `--auth` server are preferred. |
 | MCP surface | **Small, additive** | M1: `ensure_project`, `register_agent`, `send_message`, `fetch_inbox`, `threads`, `acknowledge`, `claim_request`, `hold_paths`, `heartbeat` (9; `threads` added to the ~8 suggested). M2 adds `activity_feed`, `activity_summarize` (11). M3 adds `resource_register`, `resource_find`, `resource_borrow`, `resource_release`, `resource_heartbeat`, `orphans_list`, `resource_reap` (18). |
 
 Clean-room: implement from this repo's docs only. Do not copy code or schemas from MCP Agent Mail or any project with a non-permissive license rider.
@@ -35,3 +35,9 @@ Design calls not covered by SPEC, recorded as they were made.
 | D11 | M3 | **Session end releases holds and resource leases.** `heartbeat --end --keep` keeps resource leases (servers meant to outlive a session); holds are always released. |
 | D12 | M3 | **Orphan scan** uses `lsof` (macOS first, also Linux) with `ss` as a fallback and `ps` for age/command; system daemons and Wyres are allowlisted out. Reaping by pid is limited to unregistered listeners the scan finds; registered resources are reaped by id. |
 | D13 | M3 | **Resource leases** default to 30 minutes, clamped to 1 minute – 24 hours (holds stay 1 minute – 4 hours). |
+| D14 | M4 | **Tokens act as one agent within project globs.** Secrets are `wyr_<id>_<random>`; only a SHA-256 hash is stored and the secret is printed once. No globs means no project access (mailbox, heartbeat and feed still work). |
+| D15 | M4 | **`--auth` verifies every request, including loopback ones**, because tunnels (Tailscale Serve, cloudflared, `ssh -R`) deliver from loopback. Run local agents on a separate unauthenticated loopback server or stdio. |
+| D16 | M4 | **Feed, summary and `resource_find` are node-wide read-only awareness for any token** (the feed carries no bodies); mailbox, holds, requests and resource leases are scoped. `orphans_list` never runs a process scan for remote callers. |
+| D17 | M4 | **`resource_reap` is refused for every remote caller**, regardless of token scope. |
+| D18 | M4 | **Audit log is separate from the event log**: node-local security records (not synced), arguments redacted (bodies and notes replaced by their size). Denied and unauthenticated requests are logged too. |
+| D19 | M4 | **No built-in TLS.** Remote access goes through a tunnel or reverse proxy that terminates TLS; `--allowed-host` names tunnel hostnames for DNS-rebinding protection. |

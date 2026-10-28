@@ -1,66 +1,51 @@
-# AGENTS.md — build brief (Milestone 3: resource registry)
+# AGENTS.md — build brief (Milestone 4: authenticated remote peer)
 
 **Read this before writing code.** Product vision lives in [docs/SPEC.md](docs/SPEC.md); locked defaults and milestone decisions in [docs/DECISIONS.md](docs/DECISIONS.md). This file is the scope for the current coding milestone.
 
 ## Status
 
-Milestone 3: **complete** (definition of done met). Earlier: M1 local core (tamler/wyres#1), M2 mail checking + activity feed (tamler/wyres#2). Keep the [README.md](README.md) status current in every PR.
+Milestone 4: **complete** (definition of done met). Earlier: M1 local core (tamler/wyres#1), M2 mail checking + activity feed (tamler/wyres#2), M3 resource registry (tamler/wyres#3). Keep the [README.md](README.md) status current in every PR.
 
 ## Clean-room rules (mandatory)
 
 - Implement from **this repository's docs** only.
 - **Do not** copy code, schemas, SQL, phrasing, or distinctive APIs from `mcp_agent_mail*`, forks, or any project with a non-permissive license rider.
-- Public docs for MCP, `rmcp`, SQLite, Rust crates, `lsof`, `ss` and `ps` are fine.
+- Public docs for MCP, `rmcp`, axum, Tailscale, Cloudflare and OpenSSH are fine.
 
 ## Locked defaults
 
-Apache-2.0; agent names unique per project; DB at `~/.wyres`; Rust + `rmcp` + SQLite; hooks-first; free and open source always; loopback-only binds; MSRV 1.88. **Never reap without human approval.**
+Apache-2.0; agent names unique per project; DB at `~/.wyres`; Rust + `rmcp` + SQLite; hooks-first; free and open source always; MSRV 1.88. **Never bind beyond loopback without auth. Never reap remotely.**
 
-## Milestone 3 — in scope
+## Milestone 4 — in scope
 
-"Find before start": before starting a model server, dev server or GPU job, an agent asks Wyres whether one is already running and **borrows** it instead of spawning a duplicate.
+Grok Bot (and any remote agent) as a first-class peer over authenticated streamable HTTP MCP.
 
-1. **Registry** — kinds `model_server | dev_server | port | gpu | container | long_job`; identity `kind:name` (e.g. `model_server:ollama@11434`), endpoint, port, pid, project, purpose, metadata (backend, estimated bytes for Apple Silicon unified memory, ...).
-2. **Leases** — owner + borrowers, `shared` (refcounted) or `exclusive`, TTL (default 30 min, 1 min–24 h) + heartbeat; sweeper expiry; owner release passes ownership to the oldest borrower; `--stopped` ends it.
-3. **Orphans** — resources with no live lease stay listed as orphan candidates (re-adoptable); a macOS-first scanner (`lsof`, `ss` fallback, `ps` for age/command) finds listening processes no registered resource accounts for; system daemons are allowlisted out.
-4. **Reap** — needs a grace period (default 10 min) **and** an explicit human `--confirm` on the CLI. MCP `resource_reap` only returns the plan and records a request. Only the current user's non-system processes; SIGTERM, SIGKILL only with `--force`.
-5. **Session end** — releases holds and resource leases (`heartbeat --end --keep` keeps resource leases).
-6. **Surfaces** — MCP `resource_register`, `resource_find`, `resource_borrow`, `resource_release`, `resource_heartbeat`, `orphans_list`, `resource_reap`; CLI `wyres resources | resource register|heartbeat | borrow | release | orphans | reap`.
-7. **Docs** — [docs/RESOURCES.md](docs/RESOURCES.md) and the AGENTS.md snippet below.
+1. **Tokens** — `wyres token create --agent NAME [--project GLOB]… [--label] [--expires]`, `wyres token list`, `wyres token revoke ID`. A token acts as exactly one agent and only within its project globs; only a SHA-256 hash is stored and the secret is shown once.
+2. **Authenticated HTTP** — `wyres serve --auth`: `/mcp` and `GET /activity` require `Authorization: Bearer`; every request is verified (tunnels arrive from loopback). `--allowed-host` accepts tunnel hostnames.
+3. **Scoping** — per-tool rules: the acting agent must be the token's agent (filled in when omitted); project arguments must match the globs; threads only if the agent is a participant; feed/summary/resource_find are node-wide read-only awareness; `orphans_list` never scans processes remotely.
+4. **Never `remote_reap`** — `resource_reap` is refused for every token.
+5. **Audit log** — every remote request (allowed, failed or denied) with token, agent, operation, outcome, redacted arguments and remote address; `wyres audit`.
+6. **Binding** — a non-loopback bind needs both `--auth` and `--allow-remote-bind`; otherwise refused.
+7. **`GET /activity`** — `since`, `limit`, `kinds`; same JSON as `activity_feed`; no message bodies.
+8. **Docs** — [docs/REMOTE.md](docs/REMOTE.md): Tailscale Serve, Cloudflare Tunnel, `ssh -R`, `program=grok_bot` registration.
 
-### Definition of done (Milestone 3)
+### Definition of done (Milestone 4)
 
-- [x] Registry with shared/exclusive leases, refcounts, TTL + heartbeat, transfer, adoption
-- [x] Orphan list: lapsed leases + unregistered listeners (lsof / ss / ps), system allowlist
-- [x] Reap gated by grace period + explicit human `--confirm`; MCP never terminates anything
-- [x] Holds and resource leases released on session end (`--keep` for resources)
-- [x] MCP tools + CLI commands; activity feed summaries for resource events
-- [x] Tests: core lease lifecycle; CLI; reap of a real process; MCP reap never signals; listener scan
+- [x] `wyres token create|list|revoke`; hashed secrets; expiry; revocation effective on the next request
+- [x] `wyres serve --auth` with bearer verification on `/mcp` and `GET /activity`; `--allowed-host`
+- [x] Agent + project-glob scoping for every tool; `resource_reap` never allowed remotely
+- [x] Audit log of every remote call (redacted); `wyres audit`
+- [x] Non-loopback bind only with `--auth` and `--allow-remote-bind`
+- [x] Tests: 401s, scoping, denials, audit entries and redaction, GET /activity, revocation, expiry, CLI and bind rules
+- [x] docs/REMOTE.md (Tailscale Serve, Cloudflare Tunnel, ssh -R, grok_bot registration)
 - [x] CI green: test + clippy (`-D warnings`) + fmt + MSRV 1.88
 - [x] README status updated
 
 ## Explicitly OUT of scope (later milestones)
 
-- Authenticated remote peers, tokens, audit log, `GET /activity` (Milestone 4)
-- Federation, remote resource visibility/borrow (Milestone 5)
-- Auto-reap policies (never by default), GPU pressure sampling (`powermetrics`), wake adapters, release builds (Milestone 6 / later)
-
-## Snippet for your project's AGENTS.md
-
-Paste this into the AGENTS.md (or CLAUDE.md) of any repository where agents start servers:
-
-```markdown
-## Shared resources (Wyres)
-
-- Before starting a model server, dev server, database, container or long job, call
-  `resource_find` (or run `wyres resources -q <name-or-port>`). If it is already running,
-  `resource_borrow` it instead of starting a duplicate.
-- If you start one, `resource_register` it right away with its port, pid and purpose, and keep
-  it alive with `heartbeat` / `resource_heartbeat`. Release it (`resource_release`) when done;
-  pass `stopped: true` if you shut it down.
-- Never kill processes you did not start. To get rid of an orphan, use `resource_reap`, which
-  asks a human; only a human runs `wyres reap --confirm`.
-```
+- Node pairing, per-node keys, event-log sync, cross-node mail (Milestone 5)
+- Built-in TLS termination (use a tunnel or a reverse proxy), OAuth
+- Wake adapters, Herdr plugin, release builds (Milestone 6)
 
 ## Keep the README status current
 

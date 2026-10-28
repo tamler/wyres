@@ -1,17 +1,22 @@
 //! MCP surface: a small set of tools over the core store, served by `rmcp`.
 
 use crate::reap::{self, OrphanReport, ReapPlan};
+use crate::remote::{self, RemotePeer};
 use rmcp::handler::server::router::tool::ToolRouter;
+use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::{tool, tool_handler, tool_router, Json, ServerHandler};
+use rmcp::model::{CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock};
+use rmcp::service::RequestContext;
+use rmcp::{tool, tool_handler, tool_router, ErrorData, Json, RoleServer, ServerHandler};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use wyres_core::{
     AckOutcome, AcquireHolds, ActivityFeed, ActivityKind, ActivityQuery, ActivitySummary, Agent,
-    HeartbeatReport, Hold, HoldConflict, HoldFilter, Importance, Inbox, InboxQuery, LeaseMode,
-    LeaseOutcome, Message, NewRequest, Program, Project, RegisterAgent, RegisterResource, Reply,
-    Request, RequestAction, RequestUpdate, Resource, ResourceFilter, ResourceKind, ResourceRef,
-    SendMessage, SessionInfo, SessionPhase, Since, Store, Thread, ThreadSummary,
+    AuditRecord, HeartbeatReport, Hold, HoldConflict, HoldFilter, Importance, Inbox, InboxQuery,
+    LeaseMode, LeaseOutcome, Message, NewRequest, Program, Project, RegisterAgent,
+    RegisterResource, Reply, Request, RequestAction, RequestUpdate, Resource, ResourceFilter,
+    ResourceKind, ResourceRef, SendMessage, SessionInfo, SessionPhase, Since, Store, Thread,
+    ThreadSummary,
 };
 
 #[derive(Clone)]
@@ -706,6 +711,71 @@ impl WyresMcp {
 #[tool_handler(router = self.tool_router, name = "wyres", instructions = "Wyres is a local inbox shared by coding agents on this machine. \
 Call register_agent once per session (and heartbeat periodically), fetch_inbox at the start of \
 work, acknowledge messages you have handled, claim requests before working on them, and \
-hold_paths before editing files another agent might touch. Holds are advisory leases that \
-expire unless renewed by heartbeat.")]
-impl ServerHandler for WyresMcp {}
+hold_paths before editing files another agent might touch. Before starting a server or job, \
+call resource_find and borrow what is already running. Holds and leases expire unless renewed \
+by heartbeat.")]
+impl ServerHandler for WyresMcp {
+    async fn call_tool(
+        &self,
+        mut request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, ErrorData> {
+        let peer = context
+            .extensions
+            .get::<axum::http::request::Parts>()
+            .and_then(|parts| parts.extensions.get::<RemotePeer>())
+            .cloned();
+        let Some(peer) = peer else {
+            // Local caller (stdio, or loopback HTTP without --auth): no extra checks.
+            let tcc = ToolCallContext::new(self, request, context);
+            return self.tool_router.call(tcc).await;
+        };
+        let tool = request.name.to_string();
+        let detail = remote::redact(request.arguments.as_ref());
+        let mut record = AuditRecord {
+            token_id: Some(peer.scope.token_id.clone()),
+            agent: Some(peer.scope.agent.clone()),
+            operation: format!("tools/call {tool}"),
+            outcome: "ok".into(),
+            detail: Some(detail),
+            remote: peer.remote.clone(),
+        };
+        let store = self.store.clone();
+        let mut args = request.arguments.take().unwrap_or_default();
+        let checked = tokio::task::spawn_blocking(move || {
+            remote::authorize(&store, &peer.scope, &tool, &mut args).map(|_| args)
+        })
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()));
+        match checked {
+            Ok(args) => request.arguments = Some(args),
+            Err(reason) => {
+                record.outcome = "denied".into();
+                record.detail = Some(format!(
+                    "{reason}; args: {}",
+                    record.detail.unwrap_or_default()
+                ));
+                remote::audit(&self.store, record).await;
+                let body =
+                    serde_json::json!({ "error": { "code": "forbidden", "message": reason } });
+                return Ok(
+                    CallToolResult::error(vec![ContentBlock::text(body.to_string())]).into(),
+                );
+            }
+        }
+        let result = self
+            .tool_router
+            .call(ToolCallContext::new(self, request, context))
+            .await;
+        let failed = match &result {
+            Ok(CallToolResponse::Complete(r)) => r.is_error == Some(true),
+            Ok(_) => false,
+            Err(_) => true,
+        };
+        if failed {
+            record.outcome = "error".into();
+        }
+        remote::audit(&self.store, record).await;
+        result
+    }
+}

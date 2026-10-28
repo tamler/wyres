@@ -52,9 +52,18 @@ pub enum Command {
         /// Serve MCP on stdin/stdout instead of HTTP (for MCP client configs).
         #[arg(long)]
         stdio: bool,
-        /// HTTP bind address; must be loopback.
+        /// HTTP bind address. Loopback unless --auth and --allow-remote-bind are both given.
         #[arg(long, default_value = crate::serve::DEFAULT_BIND)]
         bind: String,
+        /// Require bearer tokens (`wyres token create`) on /mcp and /activity; audit every call.
+        #[arg(long)]
+        auth: bool,
+        /// Allow a non-loopback --bind (requires --auth). Prefer a tunnel instead.
+        #[arg(long, requires = "auth")]
+        allow_remote_bind: bool,
+        /// Extra Host header to accept, e.g. a tunnel hostname (repeatable; requires --auth).
+        #[arg(long = "allowed-host", requires = "auth")]
+        allowed_hosts: Vec<String>,
         /// Seconds between sweeps that expire holds and stale requests.
         #[arg(long, default_value_t = 30)]
         sweep_secs: u64,
@@ -246,6 +255,14 @@ pub enum Command {
         #[arg(long, requires = "confirm")]
         force: bool,
     },
+    /// Create, list or revoke bearer tokens for remote peers.
+    #[command(subcommand)]
+    Token(TokenCmd),
+    /// Show the audit log of remote (token-authenticated) calls.
+    Audit {
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
+    },
     /// Show the activity feed (who is doing what), or a summary of it.
     Activity {
         /// Start point: a duration (30m, 2h, 1d), an RFC 3339 time, or an event id cursor.
@@ -270,6 +287,48 @@ pub enum Command {
         #[arg(long, default_value_t = 20)]
         limit: u32,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TokenCmd {
+    /// Create a token that acts as one agent within project globs. Printed once.
+    Create {
+        /// The agent the token acts as (register it first, e.g. with --program grok_bot).
+        #[arg(long, short = 'a')]
+        agent: String,
+        /// Project path or slug glob the token may touch (repeatable), e.g. '/work/*' or shop.
+        #[arg(long = "project", short = 'p')]
+        projects: Vec<String>,
+        /// A note to recognise the token by.
+        #[arg(long)]
+        label: Option<String>,
+        /// Expiry: seconds or a duration like 12h, 30d.
+        #[arg(long)]
+        expires: Option<String>,
+    },
+    List,
+    /// Revoke a token by id (takes effect on the next request).
+    Revoke {
+        token_id: String,
+    },
+}
+
+fn parse_secs(raw: &str) -> anyhow::Result<i64> {
+    let raw = raw.trim();
+    let split = raw.find(|c: char| !c.is_ascii_digit()).unwrap_or(raw.len());
+    let (num, unit) = raw.split_at(split);
+    let n: i64 = num
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid duration {raw:?}"))?;
+    let mult = match unit {
+        "" | "s" => 1,
+        "m" => 60,
+        "h" => 3600,
+        "d" => 86_400,
+        "w" => 604_800,
+        _ => anyhow::bail!("invalid duration {raw:?}: use s, m, h, d or w"),
+    };
+    Ok(n * mult)
 }
 
 #[derive(Debug, Subcommand)]
@@ -546,6 +605,9 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     if let Command::Serve {
         stdio,
         bind,
+        auth,
+        allow_remote_bind,
+        allowed_hosts,
         sweep_secs,
     } = &cli.command
     {
@@ -558,7 +620,12 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             if *stdio {
                 crate::serve::serve_stdio(store, every).await
             } else {
-                crate::serve::serve_http(store, bind, every).await
+                let opts = crate::serve::HttpOptions {
+                    auth: *auth,
+                    allow_remote_bind: *allow_remote_bind,
+                    allowed_hosts: allowed_hosts.clone(),
+                };
+                crate::serve::serve_http(store, bind, opts, every).await
             }
         })?;
         return Ok(ExitCode::SUCCESS);
@@ -918,6 +985,43 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             } else {
                 emit(json, &plan, output::reap_plan)
             }
+        }
+        Command::Token(TokenCmd::Create {
+            agent,
+            projects,
+            label,
+            expires,
+        }) => {
+            let expires = expires.as_deref().map(parse_secs).transpose()?;
+            let t = store.create_token(&agent, &projects, label, expires)?;
+            emit(json, &t, |t| {
+                format!(
+                    "token {} for {} (projects: {})\n\n{}\n\nThis is the only time the token is shown. \
+                     Give it to the remote peer as `Authorization: Bearer <token>`.",
+                    t.token.token_id,
+                    t.token.agent,
+                    if t.token.project_globs.is_empty() {
+                        "none".to_string()
+                    } else {
+                        t.token.project_globs.join(", ")
+                    },
+                    t.secret
+                )
+            })
+        }
+        Command::Token(TokenCmd::List) => {
+            let ts = store.tokens()?;
+            emit(json, &ts, |ts| output::tokens(ts))
+        }
+        Command::Token(TokenCmd::Revoke { token_id }) => {
+            let t = store.revoke_token(&token_id)?;
+            emit(json, &t, |t| {
+                format!("revoked token {} ({})", t.token_id, t.agent)
+            })
+        }
+        Command::Audit { limit } => {
+            let entries = store.audit_log(limit)?;
+            emit(json, &entries, |e| output::audit(e))
         }
         Command::Activity {
             since,

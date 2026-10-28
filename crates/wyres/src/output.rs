@@ -4,8 +4,8 @@ use std::fmt::Write;
 
 use serde::Serialize;
 use wyres_core::{
-    ActivityFeed, Agent, Event, HeartbeatReport, Hold, HoldConflict, HoldReport, Inbox,
-    LeaseOutcome, Message, NodeInfo, Project, Request, Resource, Thread, ThreadSummary,
+    ActivityFeed, Agent, AuditEntry, Event, HeartbeatReport, Hold, HoldConflict, HoldReport, Inbox,
+    LeaseOutcome, Message, NodeInfo, Project, Request, Resource, Thread, ThreadSummary, Token,
 };
 
 #[derive(Debug, Serialize)]
@@ -375,4 +375,50 @@ pub fn reap_plan(p: &crate::reap::ReapPlan) -> String {
         }
     }
     out
+}
+
+pub fn tokens(ts: &[Token]) -> String {
+    if ts.is_empty() {
+        return "no tokens".to_string();
+    }
+    ts.iter()
+        .map(|t| {
+            let state = if t.revoked_at.is_some() {
+                "revoked"
+            } else {
+                "active"
+            };
+            format!(
+                "{:<8} {}  {:<20} projects [{}]  last used {}{}\n",
+                state,
+                t.token_id,
+                t.agent,
+                t.project_globs.join(", "),
+                t.last_used_at.as_deref().unwrap_or("never"),
+                t.label
+                    .as_deref()
+                    .map(|l| format!("  ({l})"))
+                    .unwrap_or_default()
+            )
+        })
+        .collect()
+}
+
+pub fn audit(es: &[AuditEntry]) -> String {
+    es.iter()
+        .map(|e| {
+            format!(
+                "{}  {:<7} {:<16} {:<32} {}{}\n",
+                e.ts,
+                e.outcome,
+                e.agent.as_deref().unwrap_or("-"),
+                e.operation,
+                e.detail.as_deref().unwrap_or(""),
+                e.remote
+                    .as_deref()
+                    .map(|r| format!("  [{r}]"))
+                    .unwrap_or_default()
+            )
+        })
+        .collect()
 }
