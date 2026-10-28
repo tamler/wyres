@@ -4,8 +4,8 @@ use std::fmt::Write;
 
 use serde::Serialize;
 use wyres_core::{
-    Agent, Event, HeartbeatReport, Hold, HoldConflict, HoldReport, Inbox, Message, NodeInfo,
-    Project, Request, Thread, ThreadSummary,
+    ActivityFeed, Agent, Event, HeartbeatReport, Hold, HoldConflict, HoldReport, Inbox, Message,
+    NodeInfo, Project, Request, Thread, ThreadSummary,
 };
 
 #[derive(Debug, Serialize)]
@@ -229,4 +229,59 @@ pub fn events(es: &[Event]) -> String {
             )
         })
         .collect()
+}
+
+pub fn activity(f: &ActivityFeed) -> String {
+    f.items
+        .iter()
+        .map(|i| format!("{}  {:<8} {}\n", i.ts, i.category.as_str(), i.summary))
+        .collect()
+}
+
+#[derive(Debug, Serialize)]
+pub struct HookStatus {
+    pub client: String,
+    pub installed: bool,
+    pub config: String,
+}
+
+pub fn hook_status(rows: &[HookStatus]) -> String {
+    rows.iter()
+        .map(|r| {
+            format!(
+                "{:<7} {:<13} {}\n",
+                r.client,
+                if r.installed {
+                    "installed"
+                } else {
+                    "not installed"
+                },
+                r.config
+            )
+        })
+        .collect()
+}
+
+pub fn hook_report(r: &crate::hooks::HookReport) -> String {
+    let mut out = String::new();
+    if r.dry_run {
+        out.push_str("dry run: nothing written\n");
+    }
+    for c in &r.changes {
+        let verb = match c.change {
+            crate::hooks::ChangeKind::Create => "create",
+            crate::hooks::ChangeKind::Update => "update",
+            crate::hooks::ChangeKind::Delete => "delete",
+            crate::hooks::ChangeKind::Unchanged => "unchanged",
+        };
+        let _ = write!(out, "{verb:<9} {}", c.path);
+        if let Some(b) = &c.backup {
+            let _ = write!(out, "  (backup: {b})");
+        }
+        out.push('\n');
+    }
+    for n in &r.notes {
+        let _ = writeln!(out, "note: {n}");
+    }
+    out
 }

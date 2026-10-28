@@ -64,6 +64,8 @@ async fn exposes_the_milestone_one_tools() {
         names,
         [
             "acknowledge",
+            "activity_feed",
+            "activity_summarize",
             "claim_request",
             "ensure_project",
             "fetch_inbox",
@@ -228,6 +230,26 @@ async fn full_flow_over_mcp() {
     )
     .await;
     assert_eq!(retry["granted"].as_array().unwrap().len(), 1);
+
+    let feed = call_ok(
+        &client,
+        "activity_feed",
+        json!({ "kinds": ["request"], "since": "1h" }),
+    )
+    .await;
+    let kinds: Vec<&str> = feed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        ["request.created", "request.claimed", "request.completed"]
+    );
+    let summary = call_ok(&client, "activity_summarize", json!({})).await;
+    assert_eq!(summary["requests"]["open"], 0);
+    assert!(summary["text"].as_str().unwrap().contains("event(s) since"));
 
     assert_eq!(
         call_err(&client, "fetch_inbox", json!({ "agent": "ghost" })).await,
