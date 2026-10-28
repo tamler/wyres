@@ -2,33 +2,30 @@
 
 Free and open source, always: a local-first, vendor-neutral inbox (and later, resource registry) for coding agents. Claude Code, Grok, Codex, and others are treated equally via plain MCP + a shared CLI. Sibling agent-tools project under the [WyreUp](https://wyreup.com/) brand.
 
-**License:** [Apache-2.0](LICENSE) · **Status:** Milestone 1 complete (local core; see checklist below)
+**License:** [Apache-2.0](LICENSE) · **Status:** Milestone 2 complete (mail checking + activity feed)
 
 ## Status
 
-Milestone 1 (local core) — scope in [AGENTS.md](AGENTS.md):
+| Milestone | Scope | Status |
+|---|---|---|
+| 1 | Local core: SQLite event log, agents, mail, requests, path holds, MCP (stdio + loopback HTTP), CLI | ✅ tamler/wyres#1 |
+| 2 | Mail checking: activity feed + summary, session events, hook packs (Claude Code, Codex, Grok CLI, Cursor best effort), `wyres hook install` | ✅ complete |
+| 3 | Resource registry: leases, orphan scanner, human-approved reap | planned |
+| 4 | Authenticated remote peer (Grok Bot): tokens, audit log, `GET /activity` | planned |
+| 5 | Federation (v2): pairing, hub-and-spoke sync, cross-node mail | planned |
+| 6 | Polish: wake adapters, Herdr plugin, release builds | planned |
 
-- [x] Rust workspace: `wyres-core` (store + domain) and `wyres` (daemon + CLI); `cargo build --release` produces `wyres`
-- [x] SQLite (WAL) under `~/.wyres` or `$WYRES_HOME`, with a local `node_id` and an append-only, chained event log
-- [x] Agent register / identity (`claude | grok | codex | cursor | grok_bot | other`), `last_seen`
-- [x] Mail: send, inbox, reply, threads; per-recipient read/ack state
-- [x] Requests: `open | claimed | done | stale | cancelled` with owner; claim / release / complete / cancel
-- [x] Path holds: TTL + heartbeat, conflict report, sweeper expiry, release on `heartbeat --end`
-- [x] 9 MCP tools over `rmcp`: stdio and streamable HTTP, loopback-only binds
-- [x] Tests: register, send→inbox→ack, request claim→done, hold acquire→conflict→expire/release, MCP over stdio-style and HTTP transports, CLI
-- [x] CI green (test + clippy + fmt)
-
-Not in Milestone 1: resource registry, activity feed, federation, web UI/TUI, Herdr plugin, hook pack installers (the hook contract is documented in [docs/HOOKS.md](docs/HOOKS.md)).
+Current milestone brief: [AGENTS.md](AGENTS.md). Every milestone merges only with CI green: test, clippy `-D warnings`, fmt, MSRV 1.88.
 
 ## Docs
 
 | Doc | Purpose |
 |---|---|
-| [AGENTS.md](AGENTS.md) | **Build brief for Milestone 1** (start here if coding) |
+| [AGENTS.md](AGENTS.md) | **Build brief for the current milestone** (start here if coding) |
 | [CLAUDE.md](CLAUDE.md) | Points Claude Code at AGENTS.md |
 | [docs/SPEC.md](docs/SPEC.md) | Full research + product spec |
-| [docs/DECISIONS.md](docs/DECISIONS.md) | Locked v1 defaults |
-| [docs/HOOKS.md](docs/HOOKS.md) | Contract for client hook packs (session start / prompt / end) |
+| [docs/DECISIONS.md](docs/DECISIONS.md) | Locked defaults and milestone design decisions |
+| [docs/HOOKS.md](docs/HOOKS.md) | Hook pack install guide (Claude Code, Codex, Grok CLI, Cursor) |
 
 ## Install
 
@@ -43,6 +40,14 @@ wyres init
 ```
 
 `wyres init` creates `~/.wyres/wyres.db` (or `$WYRES_HOME/wyres.db`) and prints the local node id.
+
+## Check mail automatically (hooks)
+
+```bash
+wyres hook install --client all
+```
+
+Installs session-start / prompt / session-end hooks for Claude Code, Codex, Grok CLI and Cursor (best effort), so each session starts with a short inbox + activity digest and each prompt mentions new mail once. Idempotent, backed up, and never clobbers existing hooks; see [docs/HOOKS.md](docs/HOOKS.md).
 
 ## Connect an agent (MCP)
 
@@ -72,7 +77,9 @@ wyres serve
 | `acknowledge` | Mark messages read and acknowledged |
 | `claim_request` | `claim` / `release` / `complete` / `cancel` a request |
 | `hold_paths` | `acquire` / `check` / `renew` / `release` / `list` advisory path holds |
-| `heartbeat` | Mark alive, renew holds, get counts; `end: true` releases holds and goes offline |
+| `heartbeat` | Mark alive, renew holds, get counts; `start: true` / `end: true` record session start / end (end releases holds) |
+| `activity_feed` | Who is doing what: mail, requests, holds, sessions — summaries and ids, never bodies; `since` cursor |
+| `activity_summarize` | Counts, active agents, request/hold totals and highlights for a window (default 1h) |
 
 Tool errors are returned as `{"error": {"code", "message"}}` with codes `not_found`, `invalid`, `conflict`, `ambiguous`, `forbidden`.
 
@@ -96,6 +103,9 @@ wyres hold check --agent bob src/api/routes.rs
 wyres holds
 wyres heartbeat --agent alice
 wyres heartbeat --agent alice --end
+wyres activity --since 1h --kinds mail,request
+wyres activity --summary
+wyres hook install --client codex --dry-run
 wyres status
 wyres events --limit 20
 ```

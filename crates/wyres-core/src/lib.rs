@@ -5,6 +5,7 @@
 //! rows carry the owning `node_id` so a later federation layer can sync without a
 //! breaking migration.
 
+mod activity;
 mod error;
 mod holds;
 mod identity;
@@ -13,10 +14,15 @@ mod requests;
 mod store;
 mod time;
 
+pub use activity::{
+    ActivityFeed, ActivityItem, ActivityKind, ActivityQuery, ActivitySummary, AgentPresence,
+    RequestCounts, Since,
+};
 pub use error::{Error, ErrorBody, Result};
 pub use holds::{
     patterns_overlap, AcquireHolds, HeartbeatReport, Hold, HoldConflict, HoldFilter, HoldReport,
-    SweepReport, DEFAULT_HOLD_TTL_SECONDS, MAX_HOLD_TTL_SECONDS, MIN_HOLD_TTL_SECONDS,
+    SessionInfo, SessionPhase, SweepReport, DEFAULT_HOLD_TTL_SECONDS, MAX_HOLD_TTL_SECONDS,
+    MIN_HOLD_TTL_SECONDS,
 };
 pub use identity::{Agent, Program, Project, RegisterAgent};
 pub use mail::{

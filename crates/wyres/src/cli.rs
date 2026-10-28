@@ -8,10 +8,12 @@ use std::time::Duration;
 use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
 use wyres_core::{
-    AcquireHolds, HoldFilter, Importance, InboxQuery, NewRequest, Program, RegisterAgent, Reply,
-    RequestAction, RequestFilter, RequestStatus, RequestUpdate, SendMessage, Store,
+    AcquireHolds, ActivityKind, ActivityQuery, HoldFilter, Importance, InboxQuery, NewRequest,
+    Program, RegisterAgent, Reply, RequestAction, RequestFilter, RequestStatus, RequestUpdate,
+    SendMessage, SessionInfo, SessionPhase, Since, Store,
 };
 
+use crate::hooks::{self, Client, HookEnv, HookEvent};
 use crate::output;
 
 #[derive(Debug, Parser)]
@@ -179,15 +181,91 @@ pub enum Command {
     Heartbeat {
         #[command(flatten)]
         agent: AgentArg,
+        /// Session is starting: record a `session.started` event.
+        #[arg(long, conflicts_with = "end")]
+        start: bool,
         #[arg(long)]
         end: bool,
     },
+    /// Show the activity feed (who is doing what), or a summary of it.
+    Activity {
+        /// Start point: a duration (30m, 2h, 1d), an RFC 3339 time, or an event id cursor.
+        #[arg(long)]
+        since: Option<String>,
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
+        /// Only these categories: mail, request, hold, resource, session, system, federation.
+        #[arg(long, value_delimiter = ',')]
+        kinds: Vec<String>,
+        /// Print a summary (counts, active agents, highlights) instead of items.
+        #[arg(long)]
+        summary: bool,
+    },
+    /// Install, remove or run client hook packs.
+    #[command(subcommand)]
+    Hook(HookCmd),
     /// Expire lapsed holds and mark overdue requests stale now.
     Sweep,
     /// Show the most recent event-log records.
     Events {
         #[arg(long, default_value_t = 20)]
         limit: u32,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum ClientSel {
+    Claude,
+    Codex,
+    Grok,
+    Cursor,
+    All,
+}
+
+fn clients(sel: &[ClientSel]) -> Vec<Client> {
+    let mut out = Vec::new();
+    for s in sel {
+        let add: &[Client] = match s {
+            ClientSel::Claude => &[Client::Claude],
+            ClientSel::Codex => &[Client::Codex],
+            ClientSel::Grok => &[Client::Grok],
+            ClientSel::Cursor => &[Client::Cursor],
+            ClientSel::All => &Client::ALL,
+        };
+        for c in add {
+            if !out.contains(c) {
+                out.push(*c);
+            }
+        }
+    }
+    out
+}
+
+#[derive(Debug, Subcommand)]
+pub enum HookCmd {
+    /// Add Wyres hooks to client configs (idempotent; backs up files it changes).
+    Install {
+        /// Clients to configure (repeat or comma-separate).
+        #[arg(long, value_delimiter = ',', required = true)]
+        client: Vec<ClientSel>,
+        /// Show what would change without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Remove Wyres hooks from client configs, leaving other hooks untouched.
+    Uninstall {
+        #[arg(long, value_delimiter = ',', required = true)]
+        client: Vec<ClientSel>,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Show which clients have Wyres hooks installed.
+    Status,
+    /// Called by the hook wrapper; reads the client's JSON on stdin. Always exits 0.
+    Run {
+        event: HookEvent,
+        #[arg(long)]
+        client: Client,
     },
 }
 
@@ -388,9 +466,19 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     }
 
+    let wyres_home = || -> anyhow::Result<PathBuf> {
+        Ok(match home {
+            Some(h) => h.to_path_buf(),
+            None => wyres_core::default_home()?,
+        })
+    };
+    if let Command::Hook(cmd) = &cli.command {
+        return hook_command(cmd, json, wyres_home);
+    }
+
     let store = open(home)?;
     let code = match cli.command {
-        Command::Serve { .. } => unreachable!("handled above"),
+        Command::Serve { .. } | Command::Hook(_) => unreachable!("handled above"),
         Command::Init | Command::Status => {
             let status = output::Status {
                 node: store.node()?,
@@ -617,9 +705,36 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             let holds = store.holds(HoldFilter { project, agent })?;
             emit(json, &holds, |h| output::holds(h))
         }
-        Command::Heartbeat { agent, end } => {
-            let hb = store.heartbeat(&agent.agent, end)?;
+        Command::Heartbeat { agent, start, end } => {
+            let phase = match (start, end) {
+                (true, _) => SessionPhase::Start,
+                (_, true) => SessionPhase::End,
+                _ => SessionPhase::Beat,
+            };
+            let hb = store.session(&agent.agent, phase, SessionInfo::default())?;
             emit(json, &hb, output::heartbeat)
+        }
+        Command::Activity {
+            since,
+            limit,
+            kinds,
+            summary,
+        } => {
+            let since = since.map(|s| Since::parse(&s, store.now())).transpose()?;
+            if summary {
+                let sum = store.activity_summary(since)?;
+                emit(json, &sum, |s| s.text.clone())
+            } else {
+                let feed = store.activity(ActivityQuery {
+                    since,
+                    limit,
+                    kinds: kinds
+                        .iter()
+                        .map(|k| k.parse::<ActivityKind>())
+                        .collect::<Result<_, _>>()?,
+                })?;
+                emit(json, &feed, output::activity)
+            }
         }
         Command::Sweep => {
             let r = store.sweep()?;
@@ -636,4 +751,45 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         }
     };
     Ok(code)
+}
+
+fn hook_command(
+    cmd: &HookCmd,
+    json: bool,
+    wyres_home: impl Fn() -> anyhow::Result<PathBuf>,
+) -> anyhow::Result<ExitCode> {
+    match cmd {
+        HookCmd::Run { event, client } => {
+            // Fail open: whatever happens, print what we have and exit 0.
+            let store = wyres_home().and_then(|h| Ok(Store::open(&h)?));
+            let env = wyres_home().and_then(HookEnv::detect);
+            let text = hooks::run_fail_open(store, env, *event, *client);
+            if !text.is_empty() {
+                println!("{text}");
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        HookCmd::Install { client, dry_run } | HookCmd::Uninstall { client, dry_run } => {
+            let install = matches!(cmd, HookCmd::Install { .. });
+            let env = HookEnv::detect(wyres_home()?)?;
+            let report = hooks::install(&env, &clients(client), install, *dry_run)?;
+            Ok(emit(json, &report, output::hook_report))
+        }
+        HookCmd::Status => {
+            let env = HookEnv::detect(wyres_home()?)?;
+            let rows: Vec<output::HookStatus> = Client::ALL
+                .iter()
+                .map(|c| {
+                    let path = c.config_path(&env.home);
+                    output::HookStatus {
+                        client: c.as_str().to_string(),
+                        installed: std::fs::read_to_string(&path)
+                            .is_ok_and(|t| t.contains(hooks::MARKER)),
+                        config: path.display().to_string(),
+                    }
+                })
+                .collect();
+            Ok(emit(json, &rows, |r| output::hook_status(r)))
+        }
+    }
 }

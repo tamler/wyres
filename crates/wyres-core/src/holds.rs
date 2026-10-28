@@ -70,6 +70,24 @@ pub struct HeartbeatReport {
     pub open_requests: u32,
 }
 
+/// Which step of a session a heartbeat represents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SessionPhase {
+    Start,
+    #[default]
+    Beat,
+    End,
+}
+
+/// Optional context recorded on `session.started` / `session.ended` events.
+#[derive(Debug, Clone, Default)]
+pub struct SessionInfo {
+    /// Client program, e.g. `claude` or `codex`.
+    pub client: Option<String>,
+    /// The client's own session identifier, if it has one.
+    pub session_id: Option<String>,
+}
+
 /// Input for [`Store::acquire_holds`].
 #[derive(Debug, Clone)]
 pub struct AcquireHolds {
@@ -537,20 +555,46 @@ impl Store {
     /// Session heartbeat: touch `last_seen_at` and renew the agent's holds. With `end`,
     /// release every hold instead and mark the agent offline.
     pub fn heartbeat(&self, agent: &str, end: bool) -> Result<HeartbeatReport> {
+        let phase = if end {
+            SessionPhase::End
+        } else {
+            SessionPhase::Beat
+        };
+        self.session(agent, phase, SessionInfo::default())
+    }
+
+    /// Record a session lifecycle step. `Start` and `End` append `session.started` /
+    /// `session.ended` events; a plain `Beat` only updates presence and renews holds.
+    pub fn session(
+        &self,
+        agent: &str,
+        phase: SessionPhase,
+        info: SessionInfo,
+    ) -> Result<HeartbeatReport> {
         self.write(|tx| {
             sweep_tx(tx)?;
             let me = resolve_agent(tx, tx.node_id, agent)?;
             let owned = owned_holds(tx, &me.id, &[])?;
-            let (renewed, released, status) = if end {
+            let session_payload = || {
+                json!({
+                    "agent_id": me.id,
+                    "client": info.client,
+                    "session_id": info.session_id,
+                })
+            };
+            let (renewed, released, status) = if phase == SessionPhase::End {
                 let ids: Vec<String> = owned.into_iter().map(|(id, _)| id).collect();
                 release_tx(tx, &me.address, &ids, "session_end")?;
-                tx.emit(&me.address, "session.ended", json!({ "agent_id": me.id }))?;
+                tx.emit(&me.address, "session.ended", session_payload())?;
                 tx.execute(
                     "UPDATE agents SET status = 'offline', last_seen_at = ?2 WHERE agent_id = ?1",
                     params![me.id, tx.now],
                 )?;
                 (Vec::new(), ids, "offline")
             } else {
+                if phase == SessionPhase::Start {
+                    tx.emit(&me.address, "session.started", session_payload())?;
+                }
                 renew_tx(tx, &me.address, &owned)?;
                 touch(tx, &me.id)?;
                 let ids: Vec<String> = owned.into_iter().map(|(id, _)| id).collect();

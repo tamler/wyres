@@ -6,9 +6,10 @@ use rmcp::{tool, tool_handler, tool_router, Json, ServerHandler};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use wyres_core::{
-    AckOutcome, AcquireHolds, Agent, HeartbeatReport, Hold, HoldConflict, HoldFilter, Importance,
-    Inbox, InboxQuery, Message, NewRequest, Program, Project, RegisterAgent, Reply, Request,
-    RequestAction, RequestUpdate, SendMessage, Store, Thread, ThreadSummary,
+    AckOutcome, AcquireHolds, ActivityFeed, ActivityKind, ActivityQuery, ActivitySummary, Agent,
+    HeartbeatReport, Hold, HoldConflict, HoldFilter, Importance, Inbox, InboxQuery, Message,
+    NewRequest, Program, Project, RegisterAgent, Reply, Request, RequestAction, RequestUpdate,
+    SendMessage, SessionInfo, SessionPhase, Since, Store, Thread, ThreadSummary,
 };
 
 #[derive(Clone)]
@@ -187,9 +188,30 @@ pub struct HoldPathsOut {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct HeartbeatArgs {
     pub agent: String,
+    /// Session is starting: records a session.started event.
+    #[serde(default)]
+    pub start: bool,
     /// Session is ending: release all holds and mark the agent offline.
     #[serde(default)]
     pub end: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ActivityFeedArgs {
+    /// Start point: duration (30m, 2h, 1d), RFC 3339 time, or an event id cursor.
+    /// Omit for the most recent items.
+    pub since: Option<String>,
+    /// Maximum items (default 50, max 500).
+    pub limit: Option<u32>,
+    /// Only these categories.
+    #[serde(default)]
+    pub kinds: Vec<ActivityKind>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ActivitySummarizeArgs {
+    /// Window start: duration (30m, 2h, 1d), RFC 3339 time, or event id. Default 1h.
+    pub since: Option<String>,
 }
 
 #[tool_router(router = tool_router)]
@@ -392,7 +414,52 @@ impl WyresMcp {
         &self,
         Parameters(a): Parameters<HeartbeatArgs>,
     ) -> ToolResult<HeartbeatReport> {
-        self.run(move |s| s.heartbeat(&a.agent, a.end)).await
+        self.run(move |s| {
+            let phase = if a.end {
+                SessionPhase::End
+            } else if a.start {
+                SessionPhase::Start
+            } else {
+                SessionPhase::Beat
+            };
+            s.session(&a.agent, phase, SessionInfo::default())
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Read the activity feed: who is doing what (mail, requests, holds, \
+        sessions), oldest first. Items have one-line summaries and ids, never message bodies. \
+        Pass next_since back as since to page forward."
+    )]
+    async fn activity_feed(
+        &self,
+        Parameters(a): Parameters<ActivityFeedArgs>,
+    ) -> ToolResult<ActivityFeed> {
+        self.run(move |s| {
+            let since = a.since.map(|v| Since::parse(&v, s.now())).transpose()?;
+            s.activity(ActivityQuery {
+                since,
+                limit: a.limit.unwrap_or(50),
+                kinds: a.kinds,
+            })
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Summarize recent activity (default: last hour): event counts per \
+        category, active agents, request and hold totals, highlights, and a short text digest."
+    )]
+    async fn activity_summarize(
+        &self,
+        Parameters(a): Parameters<ActivitySummarizeArgs>,
+    ) -> ToolResult<ActivitySummary> {
+        self.run(move |s| {
+            let since = a.since.map(|v| Since::parse(&v, s.now())).transpose()?;
+            s.activity_summary(since)
+        })
+        .await
     }
 }
 

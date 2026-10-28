@@ -1,94 +1,66 @@
-# AGENTS.md — build brief (Milestone 1 only)
+# AGENTS.md — build brief (Milestone 2: mail checking + activity feed)
 
-**Read this before writing code.** Product vision and later milestones live in [docs/SPEC.md](docs/SPEC.md) and [docs/DECISIONS.md](docs/DECISIONS.md). This file is the **only** scope for the current coding milestone.
+**Read this before writing code.** Product vision lives in [docs/SPEC.md](docs/SPEC.md); locked defaults in [docs/DECISIONS.md](docs/DECISIONS.md). This file is the scope for the current coding milestone.
 
 ## Status
 
-Milestone 1: **complete** (definition of done met; CI green). Keep the [README.md](README.md) status line accurate as you finish work (and when you open PRs).
+Milestone 2: **complete** (definition of done met). Milestone 1 (local core) shipped in tamler/wyres#1. Keep the [README.md](README.md) status current in every PR.
 
 ## Clean-room rules (mandatory)
 
-- Implement from **this repository’s docs** (`docs/SPEC.md`, `docs/DECISIONS.md`, this file) only.
-- **Do not** copy code, schemas, SQL, proprietary phrasing, or distinctive APIs from:
-  - `mcp_agent_mail`, `mcp_agent_mail_rust`, or forks
-  - any project with a non-permissive license **rider** (e.g. OpenAI/Anthropic restricted MIT variants)
-- Reading public docs for MCP, `rmcp`, SQLite, and Rust crates is fine. Prior art in SPEC.md is for **ideas only**.
-- Prefer boring, original names and schemas that fit Wyres.
+- Implement from **this repository's docs** only (`docs/SPEC.md`, `docs/DECISIONS.md`, this file).
+- **Do not** copy code, schemas, SQL, proprietary phrasing, or distinctive APIs from `mcp_agent_mail`, `mcp_agent_mail_rust`, forks, or any project with a non-permissive license rider.
+- Public docs for MCP, `rmcp`, SQLite, Rust crates, and each client's hook documentation are fine.
 
 ## Locked defaults
 
-See [docs/DECISIONS.md](docs/DECISIONS.md):
+See [docs/DECISIONS.md](docs/DECISIONS.md): Apache-2.0; agent names unique per project (`name@project`); DB at `~/.wyres` (or `$WYRES_HOME`); Rust + `rmcp` + SQLite; hooks-first wake; free and open source always; loopback-only binds; MSRV Rust 1.88.
 
-- License: **Apache-2.0**
-- Agent names unique per project, addressed as `name@project` (bare `name` only when unambiguous)
-- DB: **`~/.wyres`** (or `$WYRES_HOME`)
-- Beads: deferred
-- Stack: **Rust + official `rmcp` + SQLite**
-- Wake: **hooks-first** (hook packs themselves can land after M1 core; design for them)
-- Free and open source, always
+## Milestone 2 — in scope
 
-## Milestone 1 — in scope
+The v1 delivery guarantee: agents learn about mail because a lifecycle hook injects a tiny digest, not because they poll.
 
-Deliver a working local Wyres core:
+1. **Activity feed** — a readable projection of the event log, by category `mail | request | hold | resource | session | system | federation`.
+   - MCP `activity_feed(since?, limit?, kinds?)` (oldest first, `next_since` cursor; `since` = duration, RFC 3339 time, or event id).
+   - MCP `activity_summarize(since?)` (counts, active agents, request/hold totals, highlights, text digest).
+   - CLI `wyres activity [--since] [--limit] [--kinds] [--summary] [--json]`.
+   - Items carry one-line summaries and ids only — **never message bodies**.
+2. **Session events** — `session.started` / `session.ended` recorded in the event log (`heartbeat` with `start` / `end`; hooks call them).
+3. **Hook packs** (POSIX `sh`) for Claude Code, Codex, Grok CLI, and Cursor (best effort), all calling one wrapper that runs `wyres hook run <event> --client <c>`:
+   - session start → register agent if needed, `session.started`, capped inbox + activity digest;
+   - each prompt → heartbeat (renew holds) and a one-line notice only for mail not yet announced;
+   - session end → `session.ended`, release holds.
+4. **`wyres hook install|uninstall --client <claude|codex|grok|cursor|all> [--dry-run]`** and `wyres hook status`:
+   - idempotent; backs up any file it changes; never clobbers existing hooks or unrelated settings;
+   - refuses to edit invalid JSON or files it does not own; all-or-nothing across clients.
+5. **Docs** — [docs/HOOKS.md](docs/HOOKS.md) install guide per client (including trust steps).
+6. **Tests** — feed/summary/session events in core; install/uninstall/run against a temporary `HOME`; MCP tools.
 
-1. **Rust workspace** with a daemon and a `wyres` CLI binary (single repo / Cargo workspace is fine).
-2. **SQLite** store under `~/.wyres` (WAL), with:
-   - `node_id` on durable rows (local node created on first boot)
-   - **append-only event-log-shaped records** (`event_id` ULID, `node_id`, `ts`, `actor`, `kind`, `payload`, optional `prev_id`) as the source of truth; projection tables for queries are OK
-3. **Agent register / identity** — register agents with program (`claude|grok|codex|cursor|grok_bot|other`), touch `last_seen`
-4. **Mail** — send, inbox, reply, threads (immutable messages; per-recipient delivery/read/ack state)
-5. **Requests** — status `open | claimed | done | stale | cancelled`, with owner; claim / complete / release
-6. **File holds** — path/glob leases with TTL + heartbeat; conflict check; auto-expire via sweeper; release on explicit end/heartbeat-end
-7. **MCP tools (~8)** over **rmcp** with **stdio** and **streamable HTTP**, bound **local-only** (loopback) by default
-8. **Tests + CI** — `cargo test`, `cargo clippy -- -D warnings`, `cargo fmt --check` via GitHub Actions
+### Definition of done (Milestone 2)
 
-### Suggested ~8 MCP tools (M1)
+- [x] `activity_feed` + `activity_summarize` MCP tools and `wyres activity` (with `--summary`)
+- [x] `session.started` / `session.ended` events; feed never exposes message bodies
+- [x] Hook packs for Claude Code, Codex, Grok CLI, Cursor (best effort) with a capped digest (≤ 1500 chars)
+- [x] `wyres hook install|uninstall|status` — idempotent, backed up, non-clobbering, `--dry-run`
+- [x] docs/HOOKS.md install guide
+- [x] Tests run against a temp HOME
+- [x] CI green: test + clippy (`-D warnings`) + fmt + MSRV 1.88
+- [x] README status updated
 
-Keep the surface small; combine related mutations if needed, but expose these capabilities:
+## Explicitly OUT of scope (later milestones)
 
-| # | Tool | Purpose |
-|---|---|---|
-| 1 | `ensure_project` | Register absolute project path |
-| 2 | `register_agent` | Register/update agent identity; heartbeat last_seen |
-| 3 | `send_message` | Send to recipients (optional create_request) |
-| 4 | `fetch_inbox` | Unread / urgent / open requests for an agent |
-| 5 | `acknowledge` | Mark read and/or ack a delivery |
-| 6 | `claim_request` | Claim / complete / release (or split if cleaner) |
-| 7 | `hold_paths` | Acquire / renew / release path holds; conflict report |
-| 8 | `heartbeat` | Session alive; renew owned holds; optional `--end` release |
-
-CLI should mirror the same capabilities for humans/scripts (`wyres serve`, `wyres inbox`, `wyres send`, …).
-
-### Definition of done (Milestone 1)
-
-- [x] `cargo build --release` produces `wyres`
-- [x] `wyres serve` starts local MCP (stdio and/or loopback streamable HTTP); refuses non-local binds without an explicit future flag (M1: local only)
-- [x] Fresh install creates `~/.wyres` (or `$WYRES_HOME`) DB with `node_id` + event log
-- [x] Integration or unit tests cover: register agent, send→inbox→ack, request claim→done, hold acquire→conflict→expire/release
-- [x] CI green: test + clippy + fmt
-- [x] README status updated to reflect M1 completion (or “in progress” with accurate checklist)
-- [x] No secrets, tokens, private emails/phones, or machine-specific absolute paths in the tree
-
-## Explicitly OUT of scope (do not build in M1)
-
-- Resource registry (ports/GPU/model servers, orphans, reap)
-- Federation / pairing / sync / mesh / hub relay
-- Web UI / TUI
-- Herdr plugin (and cmux/tmux wake adapters)
-- Hook pack installers (document the contract; implement later if time — **do not block M1**)
-- Beads integration
-- Public/authenticated remote MCP for Grok Bot (design only; M1 is local-only)
-
-If you finish early, improve tests, docs, and CLI UX — do **not** start OUT-of-scope features without a new milestone brief.
+- Resource registry, orphan scanner, reap (Milestone 3)
+- Authenticated remote peers, tokens, `GET /activity` over HTTP (Milestone 4)
+- Federation / pairing / sync (Milestone 5)
+- Herdr plugin, tmux/cmux wake adapters, release builds (Milestone 6)
 
 ## Implementation notes
 
-- Prefer `rusqlite` or `sqlx` with migrations.
-- ULIDs for `event_id` / `node_id` (crate of your choice that is maintained and Apache/MIT).
-- Event log first: mutating operations append an event, then update projections in the same transaction.
-- Errors: clear, structured JSON from CLI `--json` where applicable.
-- Logging: tracing; no PII beyond agent names and paths the user already passed in.
+- Hooks must **fail open**: `wyres hook run` always exits 0 and prints nothing on error; the wrapper exits 0 even if `wyres` is missing.
+- Default hook identity is `<client>@<project>` (project = nearest git root of the client's cwd), registered on first use; `$WYRES_AGENT` overrides it. No client gets special treatment.
+- Injected text is factual and short; keep it under the cap and include ids so agents can act through MCP or the CLI.
+- Clients differ: see the decisions recorded in docs/DECISIONS.md (Grok de-duplication, Cursor prompt hooks).
 
 ## Keep the README status current
 
-Whenever you complete a Definition-of-done item or open a PR that changes milestone progress, update the **Status** section in [README.md](README.md) in the same commit/PR.
+Whenever you complete a definition-of-done item or open a PR that changes milestone progress, update the **Status** section in [README.md](README.md) in the same PR.
