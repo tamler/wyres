@@ -1,0 +1,38 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+secrets/
+
+# Wyres local data (never commit)
+.wyres/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Test / coverage
+coverage/
+lcov.info
+*.profraw
+*.profdata
+
+# Misc
+/tmp/
+/dist/
