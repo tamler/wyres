@@ -50,3 +50,8 @@ Design calls not covered by SPEC, recorded as they were made.
 | D26 | M5 | **Cross-node hold clashes are warnings**, matched by project slug (repository name) since paths differ between machines. |
 | D27 | M5 | **Node names must be unique** in a federation and set before pairing (`wyres node name`); the default `local` cannot pair. |
 | D28 | M5 | **Hub reads relayed mail bodies** (self-hosted hub; end-to-end encryption deferred). Node-to-node requests are signed and time-bounded (±5 min); replays are harmless because push is idempotent and pull is read-only. |
+| D29 | M6 | **Wake adapters are optional extras on top of hooks**: `tmux send-keys`, `cmux send --surface` / `cmux notify`, `herdr agent prompt`, run as argv (no shell, no linking; cmux is GPL and only ever invoked as a separate CLI). |
+| D30 | M6 | **Wake only when something is waiting** (unread mail or open requests) unless `--force`; the message is a one-line summary with subjects, never bodies. |
+| D31 | M6 | **Wake targets are stored per agent**; session hooks auto-capture `$TMUX_PANE` / `$CMUX_SURFACE_ID`, and automatic captures never replace a target set by hand. Herdr targets default to the agent's bare name. |
+| D32 | M6 | **Linux release binaries are static musl** (x86_64, arm64) so one archive runs on any distro; macOS ships arm64 and x86_64 (unsigned; remove quarantine with `xattr`). Releases publish only from `v*` tags; PRs touching the workflow build without publishing. |
+| D33 | M6 | **Herdr plugin uses documented manifest fields only** (`[[actions]]`, `[[panes]]`, argv commands) and calls the `wyres` CLI; `min_herdr_version` is a best-effort floor. |

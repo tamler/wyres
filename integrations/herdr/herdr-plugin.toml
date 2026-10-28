@@ -1,0 +1,28 @@
+# Optional Herdr plugin for Wyres. Install with:
+#   herdr plugin install tamler/wyres/integrations/herdr
+# or, from a local checkout:
+#   herdr plugin link /path/to/wyres/integrations/herdr
+id = "wyres.inbox"
+name = "Wyres inbox"
+version = "0.1.0"
+min_herdr_version = "0.7.0"
+description = "Wake Herdr agents that have unread Wyres mail, and show the Wyres activity feed in a pane."
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "wake-agents"
+title = "Wyres: wake agents with unread mail"
+contexts = ["workspace"]
+command = ["sh", "wyres-herdr.sh", "wake"]
+
+[[actions]]
+id = "inbox-digest"
+title = "Wyres: activity summary (last hour)"
+contexts = ["workspace"]
+command = ["sh", "wyres-herdr.sh", "summary"]
+
+[[panes]]
+id = "activity"
+title = "Wyres activity"
+placement = "split"
+command = ["sh", "wyres-herdr.sh", "activity"]

@@ -285,6 +285,14 @@ pub enum Command {
         #[arg(long, default_value_t = 30)]
         every: u64,
     },
+    /// Nudge agents with unread mail through tmux, cmux or Herdr (optional adapters).
+    #[command(args_conflicts_with_subcommands = true)]
+    Wake {
+        #[command(subcommand)]
+        cmd: Option<WakeCmd>,
+        #[command(flatten)]
+        run: WakeRun,
+    },
     /// Show the activity feed (who is doing what), or a summary of it.
     Activity {
         /// Start point: a duration (30m, 2h, 1d), an RFC 3339 time, or an event id cursor.
@@ -309,6 +317,52 @@ pub enum Command {
         #[arg(long, default_value_t = 20)]
         limit: u32,
     },
+}
+
+#[derive(Debug, Args)]
+pub struct WakeRun {
+    /// Agent to wake (default: $WYRES_AGENT); or use --all.
+    #[arg(long, short = 'a', env = "WYRES_AGENT", conflicts_with = "all")]
+    agent: Option<String>,
+    /// Wake every agent with a stored target that has unread mail or open requests.
+    #[arg(long)]
+    all: bool,
+    /// Adapter: tmux | cmux | herdr (default: the agent's stored target).
+    #[arg(long)]
+    via: Option<String>,
+    /// tmux pane, cmux surface id (or `notify`), or Herdr agent name.
+    #[arg(long)]
+    target: Option<String>,
+    /// Text to send (default: a one-line inbox summary).
+    #[arg(long)]
+    message: Option<String>,
+    /// Wake even when nothing is unread.
+    #[arg(long)]
+    force: bool,
+    /// Print the adapter commands without running them.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WakeCmd {
+    /// Store where to wake an agent (hooks capture tmux/cmux targets automatically).
+    Set {
+        #[command(flatten)]
+        agent: AgentArg,
+        /// tmux | cmux | herdr
+        #[arg(long)]
+        via: String,
+        #[arg(long)]
+        target: String,
+    },
+    /// Forget an agent's wake target.
+    Clear {
+        #[command(flatten)]
+        agent: AgentArg,
+    },
+    /// List stored wake targets.
+    List,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1142,6 +1196,54 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             }
             std::thread::sleep(Duration::from_secs(every.max(5)));
         },
+        Command::Wake {
+            cmd: Some(WakeCmd::Set { agent, via, target }),
+            ..
+        } => {
+            let t = store.set_wake_target(&agent.agent, via.parse()?, &target, false)?;
+            emit(json, &t, |t| match t {
+                Some(t) => format!("wake {} via {} at {}", t.agent, t.via.as_str(), t.target),
+                None => String::new(),
+            })
+        }
+        Command::Wake {
+            cmd: Some(WakeCmd::Clear { agent }),
+            ..
+        } => {
+            let cleared = store.clear_wake_target(&agent.agent)?;
+            emit(json, &serde_json::json!({ "cleared": cleared }), |_| {
+                if cleared {
+                    "cleared".into()
+                } else {
+                    "no wake target was set".into()
+                }
+            })
+        }
+        Command::Wake {
+            cmd: Some(WakeCmd::List),
+            ..
+        } => {
+            let ts = store.wake_targets()?;
+            emit(json, &ts, |ts| output::wake_targets(ts))
+        }
+        Command::Wake { cmd: None, run } => {
+            let opts = crate::wake::WakeOptions {
+                via: run.via.as_deref().map(str::parse).transpose()?,
+                target: run.target,
+                message: run.message,
+                force: run.force,
+                dry_run: run.dry_run,
+            };
+            let plans = if run.all {
+                crate::wake::wake_all(&store, &opts)?
+            } else {
+                let agent = run
+                    .agent
+                    .ok_or_else(|| anyhow::anyhow!("give --agent (or set WYRES_AGENT) or --all"))?;
+                vec![crate::wake::wake(&store, &agent, &opts)?]
+            };
+            emit(json, &plans, |p| output::wake_plans(p))
+        }
         Command::Audit { limit } => {
             let entries = store.audit_log(limit)?;
             emit(json, &entries, |e| output::audit(e))

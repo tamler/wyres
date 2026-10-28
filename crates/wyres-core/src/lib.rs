@@ -17,6 +17,7 @@ mod resources;
 mod store;
 mod time;
 mod tokens;
+mod wake;
 
 pub use activity::{
     ActivityFeed, ActivityItem, ActivityKind, ActivityQuery, ActivitySummary, AgentPresence,
@@ -46,3 +47,4 @@ pub use resources::{
 pub use store::{default_home, Clock, Event, NodeInfo, Store, DB_FILE};
 pub use time::fmt_ts;
 pub use tokens::{AuditEntry, AuditRecord, NewToken, Token, TokenScope};
+pub use wake::{WakeTarget, WakeVia};

@@ -482,6 +482,15 @@ CREATE TABLE invites (
     used_by     TEXT
 );
 "#,
+    r#"
+CREATE TABLE wake_targets (
+    agent_id   TEXT PRIMARY KEY REFERENCES agents(agent_id),
+    via        TEXT NOT NULL,
+    target     TEXT NOT NULL,
+    auto       INTEGER NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL
+);
+"#,
 ];
 
 fn migrate(conn: &mut Connection) -> Result<()> {
