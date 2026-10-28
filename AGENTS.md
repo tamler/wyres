@@ -1,52 +1,40 @@
-# AGENTS.md — build brief (Milestone 5: federation, v2)
+# AGENTS.md — build brief (Milestone 6: polish)
 
-**Read this before writing code.** Product vision lives in [docs/SPEC.md](docs/SPEC.md); locked defaults and milestone decisions in [docs/DECISIONS.md](docs/DECISIONS.md). This file is the scope for the current coding milestone.
+**Read this before writing code.** Product vision lives in [docs/SPEC.md](docs/SPEC.md); locked defaults and every milestone decision in [docs/DECISIONS.md](docs/DECISIONS.md); contributor rules in [CONTRIBUTING.md](CONTRIBUTING.md). This file is the scope for the current coding milestone.
 
 ## Status
 
-Milestone 5: **complete** (definition of done met). Earlier: M1 local core (tamler/wyres#1), M2 mail checking + activity feed (tamler/wyres#2), M3 resource registry (tamler/wyres#3), M4 authenticated remote peer (tamler/wyres#4). Keep the [README.md](README.md) status current in every PR.
+Milestone 6: **complete** (definition of done met). Earlier: M1 local core (tamler/wyres#1), M2 mail checking + activity feed (tamler/wyres#2), M3 resource registry (tamler/wyres#3), M4 authenticated remote peer (tamler/wyres#4), M5 federation (tamler/wyres#5). Keep the [README.md](README.md) status current in every PR.
 
 ## Clean-room rules (mandatory)
 
-- Implement from **this repository's docs** only. Federation prior art in SPEC (Matrix, ActivityPub, NATS leaf nodes, Tailscale) is for ideas only.
+- Implement from **this repository's docs** and public docs of integrated tools (tmux, cmux, Herdr, GitHub Actions) only.
 - **Do not** copy code, schemas, SQL, phrasing, or distinctive APIs from `mcp_agent_mail*`, forks, or any project with a non-permissive license rider.
+- cmux is GPL: call its CLI as a separate process only; never link or vendor it.
 
 ## Locked defaults
 
-Apache-2.0; agent names unique per project; `node_id` + append-only event log; owning node is law; never CRDT-merge ownership; free and open source always (self-hostable hub, no paid relay); never bind beyond loopback without auth; **never remote reap**; MSRV 1.88.
+Apache-2.0; agent names unique per project; hooks-first (wake adapters are optional extras); free and open source always; loopback-only without auth; never reap without human approval; never remote reap; MSRV 1.88.
 
-## Milestone 5 — in scope
+## Milestone 6 — in scope
 
-1. **Per-node authority + keys** — Ed25519 key per node (created on first boot; older databases get one and their events signed on upgrade); every event signed; foreign events verified, projected, never allowed to rewrite local ownership.
-2. **Addressing** — `name@project@node` (and `name@@node`); local addresses unchanged; agents act only on their own node.
-3. **Pairing** — `wyres node name`, `wyres pair invite|join|revoke`, `wyres peers`; single-use invites carrying the hub's key; unique node names.
-4. **Sync** — hub-and-spoke: `wyres serve --federation` (hub), `wyres sync [--watch]` (spokes dial out); push own events, pull a filtered stream with cursors; idempotent; signed node requests.
-5. **Scoped permissions** — `read_feed`, `send_mail`, `borrow_resource`, enforced by the hub on push and by nodes before sending; no remote reap permission exists.
-6. **Cross-node mail** (routed only to recipient nodes) and a **merged activity feed** (node-prefixed).
-7. **Remote resources** — visible with owning node and reachability; borrowable only when reachable and permitted; lease reported to the owner; stop/reap only on the owning node.
-8. **Path clashes** — overlapping holds on another node in a same-named project come back as warnings, never locks.
-9. **Tests** — multiple nodes on one machine over real HTTP.
-10. **Docs** — [docs/FEDERATION.md](docs/FEDERATION.md).
+1. **`wyres wake`** — nudge idle agents with unread mail through optional adapters: `tmux` (send-keys), `cmux` (`send --surface` or `notify`), `herdr` (`agent prompt`). Stored per-agent targets (`wyres wake set|clear|list`), auto-captured by session hooks from `$TMUX_PANE` / `$CMUX_SURFACE_ID` (never replacing manual targets); `--all`, `--dry-run`, `--force`, `--message`. Argv only, no shell; skip when nothing is waiting.
+2. **Herdr plugin (optional)** — [integrations/herdr](integrations/herdr): `herdr-plugin.toml` with wake + summary actions and a live activity pane; POSIX `sh` helper.
+3. **Release builds** — `.github/workflows/release.yml`: macOS arm64 + x86_64, Linux static musl x86_64 + arm64; smoke tests; SHA-256 sums; GitHub Release on `v*` tags; build-only on PRs touching the workflow.
+4. **Docs** — clean README quickstart, [CONTRIBUTING.md](CONTRIBUTING.md), [docs/WAKE.md](docs/WAKE.md).
 
-### Definition of done (Milestone 5)
+### Definition of done (Milestone 6)
 
-- [x] Node keys, signed events, verification on ingest; owning node authoritative
-- [x] `agent@project@node` addressing; acting agents must be local
-- [x] `wyres pair invite|join|revoke`, `wyres peers`, `wyres node name|show`
-- [x] `wyres serve --federation` hub endpoints; `wyres sync [--watch]` push/pull with cursors
-- [x] Permissions `read_feed` / `send_mail` / `borrow_resource`; never remote reap
-- [x] Cross-node mail, replies, receipts; merged activity feed
-- [x] Remote resources visible; borrow only when reachable; reported to owner
-- [x] Cross-node hold clashes as warnings
-- [x] Multi-node integration tests on one machine (hub + 3 spokes), tampering, revocation, CLI
+- [x] `wyres wake` with tmux / cmux / Herdr adapters, stored + auto-captured targets, tests with fake adapter binaries
+- [x] Optional Herdr plugin (manifest + helper), validated in tests
+- [x] Release workflow for macOS (arm64, x86_64) and Linux, verified by a PR build
+- [x] README quickstart + CONTRIBUTING.md + docs/WAKE.md
 - [x] CI green: test + clippy (`-D warnings`) + fmt + MSRV 1.88
 - [x] README status updated
 
 ## Explicitly OUT of scope
 
-- Mesh topology; multiple hubs per spoke; end-to-end encryption of mail bodies (future)
-- Cross-node requests and distributed path locks (by design)
-- Wake adapters, Herdr plugin, release builds (Milestone 6)
+- Web UI / TUI, auto-reap policies, pre-commit hold guard, mesh federation, end-to-end mail encryption (future milestones; see SPEC "Later")
 
 ## Keep the README status current
 

@@ -726,6 +726,7 @@ pub fn run(
     let text = match event {
         HookEvent::SessionStart => {
             store.session(&agent, SessionPhase::Start, info)?;
+            crate::wake::capture_target(store, &agent);
             let digest = session_digest(store, &agent)?;
             // New mail shown here should not be announced again on the next prompt.
             let _ = prompt_notice(store, &env.wyres_home, &agent);

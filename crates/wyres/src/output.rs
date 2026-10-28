@@ -6,7 +6,7 @@ use serde::Serialize;
 use wyres_core::{
     ActivityFeed, Agent, AuditEntry, Event, HeartbeatReport, Hold, HoldConflict, HoldReport, Inbox,
     LeaseOutcome, Message, NodeInfo, Peer, Project, Request, Resource, Thread, ThreadSummary,
-    Token,
+    Token, WakeTarget,
 };
 
 #[derive(Debug, Serialize)]
@@ -466,4 +466,41 @@ pub fn sync_report(r: &crate::fed::SyncReport) -> String {
         let _ = write!(out, "\nrejected {}: {}", x.event_id, x.reason);
     }
     out
+}
+
+pub fn wake_targets(ts: &[WakeTarget]) -> String {
+    if ts.is_empty() {
+        return "no wake targets (hooks record tmux/cmux panes automatically)".to_string();
+    }
+    ts.iter()
+        .map(|t| {
+            format!(
+                "{:<24} {:<6} {}{}\n",
+                t.agent,
+                t.via.as_str(),
+                t.target,
+                if t.auto { "  (auto)" } else { "" }
+            )
+        })
+        .collect()
+}
+
+pub fn wake_plans(ps: &[crate::wake::WakePlan]) -> String {
+    ps.iter()
+        .map(|p| match (&p.skipped, p.sent) {
+            (_, true) => format!(
+                "woke {} via {} ({})\n",
+                p.agent,
+                p.via.map_or("-", |v| v.as_str()),
+                p.target.as_deref().unwrap_or("-")
+            ),
+            (Some(why), _) if why == "dry run" => p
+                .commands
+                .iter()
+                .map(|c| format!("would run: {}\n", c.join(" ")))
+                .collect(),
+            (Some(why), _) => format!("skipped {}: {why}\n", p.agent),
+            (None, false) => format!("skipped {}\n", p.agent),
+        })
+        .collect()
 }
