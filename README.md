@@ -2,7 +2,7 @@
 
 Free and open source, always: a local-first, vendor-neutral inbox (and later, resource registry) for coding agents. Claude Code, Grok, Codex, and others are treated equally via plain MCP + a shared CLI. Sibling agent-tools project under the [WyreUp](https://wyreup.com/) brand.
 
-**License:** [Apache-2.0](LICENSE) · **Status:** Milestone 3 complete (resource registry)
+**License:** [Apache-2.0](LICENSE) · **Status:** Milestone 4 complete (authenticated remote peer)
 
 ## Status
 
@@ -10,8 +10,8 @@ Free and open source, always: a local-first, vendor-neutral inbox (and later, re
 |---|---|---|
 | 1 | Local core: SQLite event log, agents, mail, requests, path holds, MCP (stdio + loopback HTTP), CLI | ✅ tamler/wyres#1 |
 | 2 | Mail checking: activity feed + summary, session events, hook packs (Claude Code, Codex, Grok CLI, Cursor best effort), `wyres hook install` | ✅ tamler/wyres#2 |
-| 3 | Resource registry: shared/exclusive leases, orphan scanner, human-approved reap | ✅ complete |
-| 4 | Authenticated remote peer (Grok Bot): tokens, audit log, `GET /activity` | planned |
+| 3 | Resource registry: shared/exclusive leases, orphan scanner, human-approved reap | ✅ tamler/wyres#3 |
+| 4 | Authenticated remote peer (Grok Bot): scoped bearer tokens, audit log, `GET /activity`, tunnel guides | ✅ complete |
 | 5 | Federation (v2): pairing, hub-and-spoke sync, cross-node mail | planned |
 | 6 | Polish: wake adapters, Herdr plugin, release builds | planned |
 
@@ -27,6 +27,7 @@ Current milestone brief: [AGENTS.md](AGENTS.md). Every milestone merges only wit
 | [docs/DECISIONS.md](docs/DECISIONS.md) | Locked defaults and milestone design decisions |
 | [docs/HOOKS.md](docs/HOOKS.md) | Hook pack install guide (Claude Code, Codex, Grok CLI, Cursor) |
 | [docs/RESOURCES.md](docs/RESOURCES.md) | Resource registry, orphans and human-approved reaping |
+| [docs/REMOTE.md](docs/REMOTE.md) | Remote peers (Grok Bot): tokens, `--auth`, tunnels, audit log |
 
 ## Install
 
@@ -54,6 +55,18 @@ Installs session-start / prompt / session-end hooks for Claude Code, Codex, Grok
 
 Agents call `resource_find` before starting a model server, dev server or job, and borrow what is already running. Orphans are listed by `wyres orphans`; only a human can reap them (`wyres reap … --confirm`). See [docs/RESOURCES.md](docs/RESOURCES.md) and the AGENTS.md snippet in [AGENTS.md](AGENTS.md#snippet-for-your-projects-agentsmd).
 
+## Remote peers (Grok Bot)
+
+```bash
+wyres token create --agent grok-bot --project '/path/to/work/*'
+```
+
+```bash
+wyres serve --auth --bind 127.0.0.1:7467
+```
+
+Expose the authenticated server through Tailscale Serve, Cloudflare Tunnel or `ssh -R`. Each token acts as one agent within its project globs, every remote call is audited (`wyres audit`), and reaping is never available remotely. See [docs/REMOTE.md](docs/REMOTE.md).
+
 ## Connect an agent (MCP)
 
 Stdio — one server process per client session, all sharing the same database:
@@ -68,7 +81,7 @@ Streamable HTTP — run the daemon once, point clients at `http://127.0.0.1:7466
 wyres serve
 ```
 
-`wyres serve` binds `127.0.0.1:7466` by default and refuses any non-loopback `--bind`. Both modes run a sweeper that expires lapsed holds and marks overdue requests stale; CLI reads sweep on demand, so the daemon is optional.
+`wyres serve` binds `127.0.0.1:7466` by default and refuses any non-loopback `--bind` unless both `--auth` and `--allow-remote-bind` are given. Both modes run a sweeper that expires lapsed holds and marks overdue requests stale; CLI reads sweep on demand, so the daemon is optional.
 
 ### MCP tools
 
@@ -122,6 +135,9 @@ wyres resource register model_server ollama@11434 --agent alice --endpoint http:
 wyres borrow model_server:ollama@11434 --agent bob
 wyres release model_server:ollama@11434 --agent bob
 wyres orphans
+wyres token create --agent grok-bot --project '/work/*' --expires 30d
+wyres token list
+wyres audit --limit 20
 wyres reap <resource-id|kind:name|pid:N>            # plan only
 wyres reap <resource-id|kind:name|pid:N> --confirm  # human confirmation
 wyres status

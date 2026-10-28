@@ -399,6 +399,17 @@ fn item(conn: &Connection, row: EventRow) -> Result<ActivityItem> {
             format!("{actor} reaped {}", s("detail")),
             json!({ "resource_id": p.get("resource_id"), "pid": p.get("pid") }),
         ),
+        "token.created" | "token.revoked" => {
+            let verb = if row.kind == "token.created" {
+                "created"
+            } else {
+                "revoked"
+            };
+            (
+                format!("remote access token {} {verb}", s("token_id")),
+                json!({ "token_id": s("token_id") }),
+            )
+        }
         other => (format!("{actor}: {other}"), p.clone()),
     };
     Ok(ActivityItem {

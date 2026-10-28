@@ -404,6 +404,32 @@ CREATE TABLE resource_leases (
 CREATE INDEX resource_leases_by_resource ON resource_leases(resource_id, released_at);
 CREATE INDEX resource_leases_by_agent ON resource_leases(agent_id, released_at);
 "#,
+    r#"
+CREATE TABLE tokens (
+    token_id      TEXT PRIMARY KEY,
+    node_id       TEXT NOT NULL REFERENCES nodes(node_id),
+    agent_id      TEXT NOT NULL REFERENCES agents(agent_id),
+    label         TEXT,
+    project_globs TEXT NOT NULL,
+    secret_hash   TEXT NOT NULL,
+    created_at    INTEGER NOT NULL,
+    expires_at    INTEGER,
+    revoked_at    INTEGER,
+    last_used_at  INTEGER
+);
+
+CREATE TABLE audit_log (
+    audit_id  INTEGER PRIMARY KEY AUTOINCREMENT,
+    node_id   TEXT NOT NULL REFERENCES nodes(node_id),
+    ts        INTEGER NOT NULL,
+    token_id  TEXT,
+    agent     TEXT,
+    operation TEXT NOT NULL,
+    outcome   TEXT NOT NULL,
+    detail    TEXT,
+    remote    TEXT
+);
+"#,
 ];
 
 fn migrate(conn: &mut Connection) -> Result<()> {

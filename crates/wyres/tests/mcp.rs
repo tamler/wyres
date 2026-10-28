@@ -270,7 +270,7 @@ async fn streamable_http_on_loopback() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let ct = CancellationToken::new();
-    let app = wyres::serve::http_router(store.clone(), ct.clone());
+    let app = wyres::serve::http_router(store.clone(), ct.clone(), &Default::default());
     let addr = wyres::serve::local_bind("127.0.0.1:0").unwrap();
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     let addr = listener.local_addr().unwrap();
