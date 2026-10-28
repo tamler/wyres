@@ -12,7 +12,7 @@ Locked defaults for v1 (2026-10-28). See [SPEC.md](SPEC.md) for the full researc
 | Wake strategy | **Hooks-first** | Claude Code, Grok, Codex (Cursor best-effort). Herdr / cmux / tmux are optional adapters, not required for core. |
 | Business model | **Free and open source, always** | Every feature (including federation) ships in the open repo. No paid tier, no paid hosted relay, no open-core upsell. Self-hostable hub; community-run relays optional. |
 | Binding (milestone 1) | **Local-only** | Loopback / stdio by default. No public bind in M1. |
-| MCP surface | **Small, additive** | M1: `ensure_project`, `register_agent`, `send_message`, `fetch_inbox`, `threads`, `acknowledge`, `claim_request`, `hold_paths`, `heartbeat` (9; `threads` added to the ~8 suggested). M2 adds `activity_feed`, `activity_summarize` (11). |
+| MCP surface | **Small, additive** | M1: `ensure_project`, `register_agent`, `send_message`, `fetch_inbox`, `threads`, `acknowledge`, `claim_request`, `hold_paths`, `heartbeat` (9; `threads` added to the ~8 suggested). M2 adds `activity_feed`, `activity_summarize` (11). M3 adds `resource_register`, `resource_find`, `resource_borrow`, `resource_release`, `resource_heartbeat`, `orphans_list`, `resource_reap` (18). |
 
 Clean-room: implement from this repo's docs only. Do not copy code or schemas from MCP Agent Mail or any project with a non-permissive license rider.
 
@@ -29,3 +29,9 @@ Design calls not covered by SPEC, recorded as they were made.
 | D5 | M2 | **Cursor is best effort.** Its prompt hook cannot inject context, so only session start carries the digest there; the prompt hook renews holds and returns `{"continue": true}`. |
 | D6 | M2 | **Prompt notices are once per message.** The last announced message id per agent is kept in `$WYRES_HOME/hooks/state/`, so repeated prompts do not repeat the same notice. |
 | D7 | M2 | **Hook installer edits user-level configs only**, refuses invalid JSON or foreign files, backs up before writing, and is all-or-nothing across the clients requested. Project-level hook files are left to the user. |
+| D8 | M3 | **Reaping is human-only.** MCP `resource_reap` returns a plan and logs `resource.reap_requested`; it never signals a process. Only `wyres reap --confirm` (CLI) terminates, after a grace period (default 10 min), for the current user's non-system processes; SIGTERM first, SIGKILL only with `--force`. There is no auto-reap. |
+| D9 | M3 | **Lapsed resources stay listed.** A resource with no live lease is an orphan candidate, not deleted; registering or borrowing it again adopts it. `release --stopped` (owner) marks it gone. |
+| D10 | M3 | **Ownership passes to the oldest borrower** when the owner releases a shared resource others still use. |
+| D11 | M3 | **Session end releases holds and resource leases.** `heartbeat --end --keep` keeps resource leases (servers meant to outlive a session); holds are always released. |
+| D12 | M3 | **Orphan scan** uses `lsof` (macOS first, also Linux) with `ss` as a fallback and `ps` for age/command; system daemons and Wyres are allowlisted out. Reaping by pid is limited to unregistered listeners the scan finds; registered resources are reaped by id. |
+| D13 | M3 | **Resource leases** default to 30 minutes, clamped to 1 minute – 24 hours (holds stay 1 minute – 4 hours). |

@@ -4,8 +4,8 @@ use std::fmt::Write;
 
 use serde::Serialize;
 use wyres_core::{
-    ActivityFeed, Agent, Event, HeartbeatReport, Hold, HoldConflict, HoldReport, Inbox, Message,
-    NodeInfo, Project, Request, Thread, ThreadSummary,
+    ActivityFeed, Agent, Event, HeartbeatReport, Hold, HoldConflict, HoldReport, Inbox,
+    LeaseOutcome, Message, NodeInfo, Project, Request, Resource, Thread, ThreadSummary,
 };
 
 #[derive(Debug, Serialize)]
@@ -282,6 +282,97 @@ pub fn hook_report(r: &crate::hooks::HookReport) -> String {
     }
     for n in &r.notes {
         let _ = writeln!(out, "note: {n}");
+    }
+    out
+}
+
+pub fn resources(rs: &[Resource]) -> String {
+    if rs.is_empty() {
+        return "no resources registered".to_string();
+    }
+    rs.iter()
+        .map(|r| {
+            let who = match (&r.owner, r.refcount) {
+                (Some(o), n) if n > 1 => format!("{o} +{} borrower(s)", n - 1),
+                (Some(o), _) => o.clone(),
+                (None, _) => "-".to_string(),
+            };
+            format!(
+                "{:<8} {:<12} {:<26} {:<9} {:<28} {}{}  [{}]\n",
+                r.status,
+                r.kind.as_str(),
+                r.name,
+                r.mode.as_str(),
+                who,
+                r.endpoint.as_deref().unwrap_or(""),
+                r.purpose
+                    .as_deref()
+                    .map(|p| format!("  ({p})"))
+                    .unwrap_or_default(),
+                r.resource_id
+            )
+        })
+        .collect()
+}
+
+pub fn lease_outcome(o: &LeaseOutcome) -> String {
+    let lease = o
+        .lease
+        .as_ref()
+        .map(|l| format!(" as {} until {}", l.role, l.expires_at))
+        .unwrap_or_default();
+    format!(
+        "{} {} {}{lease}\n{}",
+        o.outcome,
+        o.resource.kind.as_str(),
+        o.resource.name,
+        resources(std::slice::from_ref(&o.resource))
+    )
+}
+
+pub fn orphans(r: &crate::reap::OrphanReport) -> String {
+    let mut out = String::new();
+    if r.orphans.is_empty() {
+        out.push_str("no orphans found\n");
+    }
+    for o in &r.orphans {
+        let _ = writeln!(
+            out,
+            "{:<22} {:<28} pid {:<7} port {:<6} age {}s  {}",
+            o.source,
+            o.target,
+            o.pid.map_or("-".into(), |p| p.to_string()),
+            o.port.map_or("-".into(), |p| p.to_string()),
+            o.age_seconds.map_or("?".into(), |a| a.to_string()),
+            o.command.as_deref().unwrap_or("")
+        );
+    }
+    if let Some(scan) = &r.scan {
+        if let Some(e) = &scan.error {
+            let _ = writeln!(out, "scan unavailable: {e}");
+        }
+    }
+    out
+}
+
+pub fn reap_plan(p: &crate::reap::ReapPlan) -> String {
+    let mut out = format!(
+        "target {} (pid {}): {}\n",
+        p.target,
+        p.pid.map_or("-".into(), |x| x.to_string()),
+        p.command.as_deref().unwrap_or("unknown command")
+    );
+    if let Some(o) = &p.outcome {
+        let _ = writeln!(out, "{o}");
+    } else if p.eligible {
+        let _ = writeln!(
+            out,
+            "eligible; nothing was done. Re-run with --confirm to send SIGTERM."
+        );
+    } else {
+        for b in &p.blockers {
+            let _ = writeln!(out, "blocked: {b}");
+        }
     }
     out
 }

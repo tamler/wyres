@@ -721,6 +721,7 @@ pub fn run(
     let info = SessionInfo {
         client: Some(client.as_str().to_string()),
         session_id: input.session_id,
+        ..Default::default()
     };
     let text = match event {
         HookEvent::SessionStart => {

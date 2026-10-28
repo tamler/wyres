@@ -48,7 +48,7 @@ async fn in_process(store: Store) -> Client {
 }
 
 #[tokio::test]
-async fn exposes_the_milestone_one_tools() {
+async fn exposes_the_tool_surface() {
     let client = in_process(Store::open_in_memory(Clock::System).unwrap()).await;
     let info = client.peer_info().expect("server info");
     assert_eq!(info.server_info.as_ref().unwrap().name, "wyres");
@@ -71,7 +71,14 @@ async fn exposes_the_milestone_one_tools() {
             "fetch_inbox",
             "heartbeat",
             "hold_paths",
+            "orphans_list",
             "register_agent",
+            "resource_borrow",
+            "resource_find",
+            "resource_heartbeat",
+            "resource_reap",
+            "resource_register",
+            "resource_release",
             "send_message",
             "threads"
         ]

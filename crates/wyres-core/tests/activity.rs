@@ -33,6 +33,7 @@ fn feed_summarizes_without_bodies() {
             SessionInfo {
                 client: Some("claude".into()),
                 session_id: Some("s-1".into()),
+                ..Default::default()
             },
         )
         .unwrap();
